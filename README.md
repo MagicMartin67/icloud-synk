@@ -242,6 +242,14 @@ For `Photos/` this table does not apply: there are only two states, downloaded o
 ```bash
 make test    # unit tests: SRP against an independent verifier, reconcile, scanner, state
 make vet     # go vet + gofmt
+make release # dist/: one tarball per platform + SHA256SUMS (runs test and vet first)
+```
+
+Releasing is just a tag — `.github/workflows/release.yml` runs `make release` and publishes
+the archives:
+
+```bash
+git tag -a v0.2.0 -m "icloud-synk v0.2.0" && git push origin v0.2.0
 ```
 
 Layout:

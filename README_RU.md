@@ -243,6 +243,14 @@ sudo loginctl enable-linger $USER
 ```bash
 make test    # юнит-тесты: SRP против независимого верификатора, сверка, сканер, состояние
 make vet     # go vet + gofmt
+make release # dist/: по архиву на платформу + SHA256SUMS (сначала прогоняет test и vet)
+```
+
+Релиз — это просто тег: `.github/workflows/release.yml` выполнит `make release` и выложит
+архивы:
+
+```bash
+git tag -a v0.2.0 -m "icloud-synk v0.2.0" && git push origin v0.2.0
 ```
 
 Структура:
