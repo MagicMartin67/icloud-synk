@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ak/icloud-synk/internal/icloud"
+	"github.com/kolesnikav/icloud-synk/internal/icloud"
 )
 
 var basePolicy = Policy{DeleteLocal: true, DeleteRemote: true, Conflict: "both"}

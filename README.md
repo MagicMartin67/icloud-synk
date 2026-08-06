@@ -37,9 +37,15 @@
 ## Установка
 
 ```bash
-git clone <repo> icloud-synk && cd icloud-synk
+git clone git@github.com:kolesnikav/icloud-synk.git && cd icloud-synk
 make build              # bin/icloud-synk
 make install            # ~/.local/bin/icloud-synk
+```
+
+Либо напрямую через Go (работает после переименования репозитория в `icloud-synk`):
+
+```bash
+go install github.com/kolesnikav/icloud-synk/cmd/icloud-synk@latest
 ```
 
 Требуется Go 1.24+ (собрано и проверено на 1.26). Внешних зависимостей одна — `fsnotify`.

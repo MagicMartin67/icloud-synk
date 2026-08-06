@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ak/icloud-synk/internal/icloud"
+	"github.com/kolesnikav/icloud-synk/internal/icloud"
 )
 
 // OpKind is the kind of action a reconciliation produced.

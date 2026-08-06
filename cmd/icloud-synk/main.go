@@ -19,9 +19,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ak/icloud-synk/internal/config"
-	"github.com/ak/icloud-synk/internal/icloud"
-	"github.com/ak/icloud-synk/internal/synk"
+	"github.com/kolesnikav/icloud-synk/internal/config"
+	"github.com/kolesnikav/icloud-synk/internal/icloud"
+	"github.com/kolesnikav/icloud-synk/internal/synk"
 )
 
 const usage = `icloud-synk — synchronise a local folder with iCloud

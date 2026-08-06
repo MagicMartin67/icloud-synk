@@ -1,6 +1,6 @@
 [Unit]
 Description=iCloud folder sync (icloud-synk)
-Documentation=https://github.com/ak/icloud-synk
+Documentation=https://github.com/kolesnikav/icloud-synk
 # A user unit, not a system one: notify-send needs the user's session bus.
 After=network-online.target
 Wants=network-online.target

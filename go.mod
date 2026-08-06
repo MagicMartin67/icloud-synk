@@ -1,4 +1,4 @@
-module github.com/ak/icloud-synk
+module github.com/kolesnikav/icloud-synk
 
 go 1.24
 

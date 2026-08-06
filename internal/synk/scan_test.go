@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ak/icloud-synk/internal/config"
+	"github.com/kolesnikav/icloud-synk/internal/config"
 )
 
 func TestScannerFindsFilesAndSkipsExcluded(t *testing.T) {

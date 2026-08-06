@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ak/icloud-synk/internal/config"
-	"github.com/ak/icloud-synk/internal/icloud"
+	"github.com/kolesnikav/icloud-synk/internal/config"
+	"github.com/kolesnikav/icloud-synk/internal/icloud"
 )
 
 // folderBatch is how many folders are requested per API call while walking.

@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ak/icloud-synk/internal/icloud"
+	"github.com/kolesnikav/icloud-synk/internal/icloud"
 )
 
 // Daemon keeps a folder and iCloud converged: local changes are picked up by

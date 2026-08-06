@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ak/icloud-synk/internal/icloud"
+	"github.com/kolesnikav/icloud-synk/internal/icloud"
 )
 
 // photoPageSize is how many assets are requested per CloudKit query.
