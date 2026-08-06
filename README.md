@@ -1,40 +1,63 @@
 # icloud-synk
 
-Демон для Ubuntu (Go, без CGO), который держит указанную папку синхронной с iCloud:
+*По-русски: [README_RU.md](README_RU.md)*
 
-* **iCloud Drive — двусторонне и на лету.** Положили файл в папку — он уехал в облако
-  (inotify, задержка ~2 с). Добавили файл на icloud.com — он появился локально
-  (поллинг, по умолчанию каждые 30 с).
-* **Фото — только скачивание.** Медиатека «Фото» выгружается в `Photos/ГГГГ/ММ/`
-  оригиналами (HEIC/JPEG/MOV как есть).
+A daemon for Ubuntu (Go, no CGO) that keeps a local folder in sync with iCloud:
+
+* **iCloud Drive — two-way, as you work.** Drop a file into the folder and it goes to the
+  cloud (inotify, ~2 s debounce). Add a file on icloud.com and it shows up locally
+  (polling, every 30 s by default).
+* **Photos — download only, and append only.** The photo library is written to
+  `Photos/YYYY/MM/` as originals (HEIC/JPEG/MOV untouched). Deleting a photo in the cloud
+  does **not** delete your local copy — see
+  [Photos are an archive, not a mirror](#photos-are-an-archive-not-a-mirror).
 
 ```
 ~/iCloud/
-├── Drive/          ← двусторонняя синхронизация с iCloud Drive
-├── Photos/2026/08/ ← только скачивание
+├── Drive/          ← two-way sync with iCloud Drive
+├── Photos/2026/08/ ← download only, never deleted
 └── .icloud-synk/
-    ├── state.json  ← база синхронизации
-    └── trash/      ← сюда попадает то, что удалили в iCloud
+    ├── state.json  ← sync database
+    └── trash/      ← where files deleted in iCloud Drive land
 ```
 
-## Важно понимать до установки
+## Read this before installing
 
-У Apple **нет** публичного API iCloud для Linux: CloudKit Web Services даёт доступ только к
-контейнеру собственного приложения, но не к пользовательскому Drive и не к медиатеке.
-Поэтому программа работает через тот же приватный веб-API, что и сайт icloud.com
-(SRP-логин на `idmsa.apple.com`, затем сервисы `drivews` / `docws` / `ckdatabasews`) —
-подход, много лет используемый pyicloud и icloudpd. Следствия:
+Apple provides **no** public iCloud API for Linux: CloudKit Web Services only reaches your
+own app's container, not the user's Drive and not the photo library. So this program speaks
+the same private web API that icloud.com does (SRP login against `idmsa.apple.com`, then the
+`drivews` / `docws` / `ckdatabasews` services) — the approach pyicloud and icloudpd have used
+for years. Consequences:
 
-* Apple может изменить эти эндпоинты без предупреждения — тогда потребуется правка кода.
-  Всё, что зависит от версии протокола, собрано в `internal/icloud/client.go`.
-* Пуш-уведомлений об изменениях в облаке нет, отсюда поллинг.
-* Слишком частый поллинг Apple может воспринять как абьюз — по умолчанию 30 с и
-  экспоненциальный backoff до 15 минут при ошибках.
-* Загрузка **в** медиатеку «Фото» не поддерживается сознательно: приватный CloudKit
-  asset-upload не документирован и способен повредить библиотеку. Файлы, положенные
-  руками в `Photos/`, программа не трогает и никуда не отправляет.
+* Apple can change these endpoints without notice, and then the code needs fixing.
+  Everything protocol-version-dependent lives in `internal/icloud/client.go`.
+* There are no push notifications for cloud-side changes, hence polling.
+* Polling too aggressively can look like abuse to Apple — the default is 30 s with
+  exponential backoff up to 15 minutes on errors.
+* Uploading **into** the photo library is deliberately unsupported: the private CloudKit
+  asset-upload flow is undocumented and can corrupt the library. Files you place into
+  `Photos/` by hand are left alone and never sent anywhere.
 
-## Установка
+## Photos are an archive, not a mirror
+
+The `Photos/` folder only ever grows. There is no code path that removes a file from it: the
+photo pass walks what iCloud hands out and downloads whatever is missing
+(`internal/synk/photos.go`). The `delete_remote` / `delete_local` flags apply to `Drive/`
+only — deletion reconciliation runs over that tree and never sees `Photos/`.
+
+What follows from that:
+
+* **Delete a photo in the cloud (or on your iPhone) and the local file stays.** Apple purges
+  "Recently Deleted" after 30 days; your copy lives on. That is the intent: the local folder
+  is an archive nothing disappears from on its own.
+* **Delete a file from `Photos/` by hand and it will not be re-downloaded.** The asset is
+  recorded in `state.json` as fetched, and a re-download only happens if the asset itself
+  changed in iCloud (its checksum changed). To get a deleted file back, drop the matching
+  entry from `state.json` or reset the state.
+* **Reorganizing `Photos/` is safe** — renames and moves go unnoticed and are never
+  reverted.
+
+## Install
 
 ```bash
 git clone git@github.com:kolesnikav/icloud-synk.git && cd icloud-synk
@@ -42,87 +65,87 @@ make build              # bin/icloud-synk
 make install            # ~/.local/bin/icloud-synk
 ```
 
-Либо напрямую через Go (работает после переименования репозитория в `icloud-synk`):
+Or straight through Go:
 
 ```bash
 go install github.com/kolesnikav/icloud-synk/cmd/icloud-synk@latest
 ```
 
-Требуется Go 1.24+ (собрано и проверено на 1.26). Внешних зависимостей одна — `fsnotify`.
+Requires Go 1.24+ (built and tested on 1.26). One external dependency: `fsnotify`.
 
-## Первый запуск
+## First run
 
 ```bash
 icloud-synk login --dir ~/iCloud
 ```
 
-Спросит Apple ID, пароль (эхо в терминале отключено) и шестизначный код 2FA.
-Пароль **не сохраняется**: на диск ложится только сессия и trust token
-(`~/.config/icloud-synk/session.json`, права 0600), которого хватает примерно на 30 дней.
+It asks for your Apple ID, password (terminal echo off) and the six-digit 2FA code.
+The password is **not stored**: only the session and trust token go to disk
+(`~/.config/icloud-synk/session.json`, mode 0600), good for roughly 30 days.
 
-### Если код 2FA не пришёл
+### If the 2FA code never arrives
 
-Apple **никогда не присылает код на почту**. Варианты, где его взять:
+Apple **never emails the code**. Where to get it:
 
-* На iPhone/iPad/Mac появляется окно «Вход в учётную запись Apple ID…» — код показывается
-  **только после нажатия «Разрешить»**. Если нажали «Не разрешать», уведомление не повторится.
-* Надёжнее сгенерировать код самому, без уведомлений:
-  **Настройки → [ваше имя] → Вход и безопасность → Двухфакторная аутентификация →
-  Получить код проверки** (на Mac — «Системные настройки»).
-* В приглашении `Two-factor code:` работают команды:
-  * `sms` — отправить код SMS на доверенный номер (`sms 2` — на второй номер из списка);
-  * `push` — повторно отправить запрос на доверенные устройства;
-  * `q` — отменить вход.
+* Your iPhone/iPad/Mac shows an "Apple ID Sign In Requested" dialog — the code appears
+  **only after you tap "Allow"**. Tap "Don't Allow" and the prompt will not come back.
+* More reliable is generating a code yourself, without any notification:
+  **Settings → [your name] → Sign-In & Security → Two-Factor Authentication →
+  Get Verification Code** (on a Mac, System Settings).
+* At the `Two-factor code:` prompt these commands work:
+  * `sms` — send the code by SMS to a trusted number (`sms 2` picks the second one);
+  * `push` — re-send the request to your trusted devices;
+  * `q` — cancel the login.
 
-Программа сама печатает, сколько доверенных устройств и какие номера доступны.
-Код принимается и с пробелами (`123 456`).
+The program prints how many trusted devices and which numbers are available.
+Codes are accepted with spaces too (`123 456`).
 
-Сначала — «холостой» прогон, чтобы увидеть план без изменений:
+Start with a dry run to see the plan without changing anything:
 
 ```bash
 icloud-synk sync --dry-run
 ```
 
-Затем одиночный полный проход:
+Then a single full pass:
 
 ```bash
 icloud-synk sync
 ```
 
-## Демон
+## Daemon
 
 ```bash
-make service     # копирует user-юнит, включает и запускает его
+make service     # installs the user unit, enables and starts it
 journalctl --user -u icloud-synk -f
 ```
 
-Юнит пользовательский, а не системный: нужен доступ к сессионной шине для
-`notify-send`. Чтобы демон работал и без активного входа в графику:
+It is a user unit rather than a system one: `notify-send` needs the session bus. To keep the
+daemon running without an active graphical login:
 
 ```bash
 sudo loginctl enable-linger $USER
 ```
 
-Когда trust token истечёт, демон не упадёт: он напишет в журнал, покажет уведомление
-и будет ждать. Достаточно выполнить `icloud-synk login` в терминале — демон подхватит
-новую сессию сам, перезапуск не нужен.
+When the trust token expires the daemon does not die: it logs the fact, shows a notification
+and waits. Just run `icloud-synk login` in a terminal — the daemon picks up the new session
+by itself, no restart needed.
 
-## Команды
+## Commands
 
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `icloud-synk login [--dir PATH] [--apple-id ID]` | вход, запись конфига и сессии |
-| `icloud-synk sync [--dry-run] [--drive\|--photos]` | один проход и выход |
-| `icloud-synk daemon [--poll 30s]` | постоянная синхронизация |
-| `icloud-synk status` | Apple ID, срок сессии, счётчики, проверка связи |
-| `icloud-synk config` | эффективная конфигурация |
-| `icloud-synk logout` | забыть сессию (папку и состояние не трогает) |
+| `icloud-synk login [--dir PATH] [--apple-id ID]` | log in, write config and session |
+| `icloud-synk sync [--dry-run] [--drive\|--photos]` | one pass, then exit |
+| `icloud-synk daemon [--poll 30s]` | continuous sync |
+| `icloud-synk status` | Apple ID, session expiry, counters, connectivity check |
+| `icloud-synk config` | effective configuration |
+| `icloud-synk logout` | forget the session (folder and state untouched) |
 
-Флаг `--verbose` включает отладочный лог у любой команды.
+`--verbose` turns on debug logging for any command.
 
-## Конфигурация
+## Configuration
 
-`~/.config/icloud-synk/config.json` (создаётся при `login`, значения ниже — по умолчанию):
+`~/.config/icloud-synk/config.json` (created by `login`; values below are the defaults):
 
 ```json
 {
@@ -145,63 +168,65 @@ sudo loginctl enable-linger $USER
 }
 ```
 
-* `delete_remote` — локальное удаление отправляет файл в корзину iCloud.
-* `delete_local` — удаление в iCloud переносит локальный файл в `.icloud-synk/trash/<дата>/`.
-  Оба флага можно выключить: тогда удалённые файлы просто восстановятся с другой стороны.
-* `conflict` — `both` (сохранить обе версии), `newer` (побеждает более новая),
-  `remote` (всегда версия из iCloud, локальная уходит в локальную корзину).
-* `exclude` — шаблоны сопоставляются с каждым сегментом пути.
-* `password_command` — команда, печатающая пароль, для входа без терминала
-  (например `secret-tool lookup service icloud`). Альтернатива — переменная
-  `ICLOUD_PASSWORD`.
+* `delete_remote` — a local deletion moves the file to the iCloud trash.
+* `delete_local` — a deletion in iCloud moves the local file to `.icloud-synk/trash/<date>/`.
+  Either flag can be turned off, in which case deleted files simply come back from the other
+  side. Both apply to `Drive/` only and have no effect on `Photos/`.
+* `conflict` — `both` (keep both versions), `newer` (the newer one wins),
+  `remote` (the iCloud version always wins, the local one goes to the local trash).
+* `exclude` — patterns are matched against every path segment.
+* `password_command` — a command that prints the password, for logging in without a terminal
+  (e.g. `secret-tool lookup service icloud`). The `ICLOUD_PASSWORD` variable works too.
 
-## Как решается, что копировать
+## How it decides what to copy (Drive)
 
-Каждый проход сравнивает **три** источника: локальное дерево, дерево в iCloud и состояние
-после предыдущего прохода (`state.json`). Без третьего источника отсутствующий файл
-неотличим от удалённого.
+Every pass compares **three** sources: the local tree, the iCloud tree, and the state left by
+the previous pass (`state.json`). Without the third one a missing file is indistinguishable
+from a deleted one.
 
-| локально | в iCloud | в состоянии | действие |
+| local | iCloud | state | action |
 |---|---|---|---|
-| новый | — | — | загрузить в iCloud |
-| — | новый | — | скачать |
-| изменён | не изменён | есть | загрузить |
-| не изменён | изменён | есть | скачать |
-| изменён | изменён | есть | конфликт (см. `conflict`) |
-| удалён | есть | есть | корзина iCloud |
-| есть | удалён | есть | `.icloud-synk/trash/` |
+| new | — | — | upload to iCloud |
+| — | new | — | download |
+| changed | unchanged | present | upload |
+| unchanged | changed | present | download |
+| changed | changed | present | conflict (see `conflict`) |
+| deleted | present | present | iCloud trash |
+| present | deleted | present | `.icloud-synk/trash/` |
 
-«Изменён локально» = отличается размер или mtime; при совпадении размера дополнительно
-сверяется SHA-256, поэтому `touch` не вызывает повторной загрузки. «Изменён в iCloud» =
-изменился etag.
+"Changed locally" means a different size or mtime; when sizes match, SHA-256 is compared as
+well, so a `touch` does not trigger a re-upload. "Changed in iCloud" means a different etag.
 
-Конфликт при `conflict: both` выглядит так: побеждает более новая версия, проигравшая
-остаётся рядом файлом `отчёт.conflict-2026-08-06T12-30-00.docx` и на следующем проходе
-тоже уезжает в облако, так что ничего не теряется.
+With `conflict: both` the newer version wins and the loser is kept alongside it as
+`report.conflict-2026-08-06T12-30-00.docx`, which the next pass uploads too — nothing is
+lost.
 
-## Чего программа не делает
+For `Photos/` this table does not apply: there are only two states, downloaded or not.
 
-* Не загружает фото и видео в медиатеку «Фото» (см. выше).
-* Не синхронизирует пакеты-бандлы iCloud (`.pages`, `.numbers`, `.key`): они
-  пропускаются с записью в журнал.
-* Не следует по символическим ссылкам — они пропускаются.
-* Не переносит переименования как переименования: файл выгружается заново под новым
-  именем, старый уходит в корзину.
-* Не поддерживает совместное редактирование и историю версий iCloud.
+## What it does not do
 
-## Разработка
+* Does not upload photos or videos into the photo library (see above).
+* Does not delete anything from `Photos/` — neither on the cloud's request nor on its own.
+* Does not sync iCloud bundle packages (`.pages`, `.numbers`, `.key`): they are skipped with
+  a log line.
+* Does not follow symlinks — they are skipped.
+* Does not carry renames across as renames: the file is uploaded afresh under the new name
+  and the old one goes to the trash.
+* Does not support collaborative editing or iCloud version history.
+
+## Development
 
 ```bash
-make test    # юнит-тесты: SRP против независимого верификатора, сверка, сканер, состояние
+make test    # unit tests: SRP against an independent verifier, reconcile, scanner, state
 make vet     # go vet + gofmt
 ```
 
-Структура:
+Layout:
 
 ```
 cmd/icloud-synk/       CLI
-internal/config/       конфигурация
-internal/icloud/       клиент приватного API: SRP, сессия, Drive, Photos
-internal/synk/         состояние, сканер, сверка, применение, демон
+internal/config/       configuration
+internal/icloud/       private-API client: SRP, session, Drive, Photos
+internal/synk/         state, scanner, reconcile, apply, daemon
 packaging/             systemd user unit
 ```
