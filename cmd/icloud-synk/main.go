@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +35,7 @@ Usage:
   icloud-synk status                                 show session and state
   icloud-synk logout                                 forget the stored session
   icloud-synk config                                 print the effective configuration
+  icloud-synk version                                print the build version
 
 Common flags:
   --dir PATH        local folder to sync into (saved to the config)
@@ -42,6 +45,20 @@ Common flags:
 Configuration lives in ~/.config/icloud-synk/config.json, the session in
 session.json next to it (mode 0600). The password is never stored.
 `
+
+// version is stamped at build time (see the Makefile). A binary downloaded from
+// a release must be able to say which build it is.
+var version = "dev"
+
+func versionString() string {
+	v := version
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+	}
+	return fmt.Sprintf("icloud-synk %s %s/%s %s", v, runtime.GOOS, runtime.GOARCH, runtime.Version())
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -65,6 +82,9 @@ func main() {
 		err = cmdLogout(args)
 	case "config":
 		err = cmdConfig(args)
+	case "version", "--version", "-V":
+		fmt.Println(versionString())
+		return
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

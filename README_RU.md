@@ -58,6 +58,27 @@
 
 ## Установка
 
+### Готовый бинарник (Go не нужен)
+
+К каждому [релизу](https://github.com/kolesnikav/icloud-synk/releases) приложены статические
+сборки без CGO для `linux/amd64` и `linux/arm64`:
+
+```bash
+curl -fsSL https://github.com/kolesnikav/icloud-synk/releases/latest/download/icloud-synk-linux-amd64.tar.gz \
+  | tar -xz --strip-components=1 -C /tmp icloud-synk-linux-amd64/icloud-synk
+install -Dm755 /tmp/icloud-synk ~/.local/bin/icloud-synk
+icloud-synk version
+```
+
+Внутри архива также лежат `icloud-synk.service` и оба README. Рядом с архивами есть
+`SHA256SUMS` для проверки:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+### Из исходников
+
 ```bash
 git clone git@github.com:kolesnikav/icloud-synk.git && cd icloud-synk
 make build              # bin/icloud-synk
@@ -139,6 +160,7 @@ sudo loginctl enable-linger $USER
 | `icloud-synk status` | Apple ID, срок сессии, счётчики, проверка связи |
 | `icloud-synk config` | эффективная конфигурация |
 | `icloud-synk logout` | забыть сессию (папку и состояние не трогает) |
+| `icloud-synk version` | версия сборки, платформа и версия Go |
 
 Флаг `--verbose` включает отладочный лог у любой команды.
 

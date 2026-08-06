@@ -59,6 +59,28 @@ What follows from that:
 
 ## Install
 
+### Prebuilt binary (no Go needed)
+
+Static, CGO-free binaries are attached to every
+[release](https://github.com/kolesnikav/icloud-synk/releases) for `linux/amd64` and
+`linux/arm64`:
+
+```bash
+curl -fsSL https://github.com/kolesnikav/icloud-synk/releases/latest/download/icloud-synk-linux-amd64.tar.gz \
+  | tar -xz --strip-components=1 -C /tmp icloud-synk-linux-amd64/icloud-synk
+install -Dm755 /tmp/icloud-synk ~/.local/bin/icloud-synk
+icloud-synk version
+```
+
+Each tarball also carries `icloud-synk.service` and both READMEs. `SHA256SUMS` next to the
+archives lets you verify the download:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+### From source
+
 ```bash
 git clone git@github.com:kolesnikav/icloud-synk.git && cd icloud-synk
 make build              # bin/icloud-synk
@@ -140,6 +162,7 @@ by itself, no restart needed.
 | `icloud-synk status` | Apple ID, session expiry, counters, connectivity check |
 | `icloud-synk config` | effective configuration |
 | `icloud-synk logout` | forget the session (folder and state untouched) |
+| `icloud-synk version` | build version, platform and Go version |
 
 `--verbose` turns on debug logging for any command.
 
