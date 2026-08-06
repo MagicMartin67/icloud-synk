@@ -1,0 +1,31 @@
+[Unit]
+Description=iCloud folder sync (icloud-synk)
+Documentation=https://github.com/ak/icloud-synk
+# A user unit, not a system one: notify-send needs the user's session bus.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/icloud-synk daemon
+Restart=always
+RestartSec=30
+# Give the machine time to get networking up after login.
+ExecStartPre=/bin/sh -c 'sleep 5'
+
+# The daemon only needs its config directory and the sync folder.
+Environment=GOMAXPROCS=4
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=icloud-synk
+
+# Hardening: no privileges are required at all.
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=default.target
