@@ -91,18 +91,15 @@ func main() {
 					continue
 				}
 
-				if item.FullName() == "icloud-test.txt" ||
-					strings.Contains(strings.ToLower(item.FullName()), "test-von-icloud") {
-					fmt.Printf(
-						"Datei: %s | Typ: %s | Größe: %d | ETag: %s | Geändert: %s | ItemCount: %d\n",
-						item.FullName(),
-						item.Type,
-						item.Size,
-						item.Etag,
-						item.ModTime().Format(time.RFC3339),
-						item.ItemCount,
-					)
-				}
+				fmt.Printf(
+					"Datei: %s | Typ: %s | Größe: %d | ETag: %s | Geändert: %s | ItemCount: %d\n",
+					item.FullName(),
+					item.Type,
+					item.Size,
+					item.Etag,
+					item.ModTime().Format(time.RFC3339),
+					item.ItemCount,
+				)
 			}
 		}
 	}
