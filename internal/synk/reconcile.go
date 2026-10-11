@@ -49,6 +49,12 @@ type Op struct {
 type Policy struct {
 	DeleteLocal  bool
 	DeleteRemote bool
+	// ProtectDeletions skips previously-synced paths missing on one side instead of
+	// automatically deleting or recreating the missing counterpart.
+	ProtectDeletions bool
+	// ProtectedPaths contains local paths intentionally omitted from the scan,
+	// such as files exceeding max_file_size. They must not trigger reconciliation.
+	ProtectedPaths map[string]bool
 	// Conflict is "both", "newer" or "remote".
 	Conflict string
 }
@@ -77,11 +83,24 @@ func Reconcile(local map[string]LocalFile, remote map[string]icloud.Item, state 
 		r, hasR := remote[path]
 		st, hasS := state[path]
 
+		if p.ProtectedPaths[path] {
+			ops = append(ops, Op{
+				Kind: OpSkip, Path: path,
+				Note: "local file exceeds max_file_size; reconciliation protected",
+			})
+			continue
+		}
+
 		switch {
 		// ---------------------------------------------------------- directories
 		case hasR && r.IsDir():
 			if !hasL {
-				ops = append(ops, Op{Kind: OpMkdirLocal, Path: path, Remote: r})
+				if p.ProtectDeletions && hasS && st.IsDir {
+					ops = append(ops, Op{Kind: OpSkip, Path: path, Remote: r,
+						Note: "previously synced local directory is missing; deletion protected"})
+				} else {
+					ops = append(ops, Op{Kind: OpMkdirLocal, Path: path, Remote: r})
+				}
 				continue
 			}
 			if !l.IsDir {
@@ -94,7 +113,10 @@ func Reconcile(local map[string]LocalFile, remote map[string]icloud.Item, state 
 		case hasL && l.IsDir:
 			if hasS && st.IsDir && st.DrivewsID != "" {
 				// The directory was synced before and is gone from iCloud.
-				if p.DeleteLocal {
+				if p.ProtectDeletions {
+					ops = append(ops, Op{Kind: OpSkip, Path: path, Local: l,
+						Note: "previously synced iCloud directory is missing; deletion protected"})
+				} else if p.DeleteLocal {
 					ops = append(ops, Op{Kind: OpTrashLocal, Path: path, Local: l,
 						Note: "directory removed in iCloud"})
 				} else {
@@ -129,7 +151,10 @@ func Reconcile(local map[string]LocalFile, remote map[string]icloud.Item, state 
 
 		case hasL && !hasR:
 			if hasS && st.DrivewsID != "" {
-				if p.DeleteLocal {
+				if p.ProtectDeletions {
+					ops = append(ops, Op{Kind: OpSkip, Path: path, Local: l,
+						Note: "previously synced iCloud file is missing; deletion protected"})
+				} else if p.DeleteLocal {
 					// It was in iCloud and is gone: the deletion happened there.
 					ops = append(ops, Op{Kind: OpTrashLocal, Path: path, Local: l,
 						Note: "removed in iCloud"})
@@ -147,7 +172,10 @@ func Reconcile(local map[string]LocalFile, remote map[string]icloud.Item, state 
 				continue
 			}
 			if hasS && !st.LocalMTime.IsZero() {
-				if p.DeleteRemote {
+				if p.ProtectDeletions {
+					ops = append(ops, Op{Kind: OpSkip, Path: path, Remote: r,
+						Note: "previously synced local file is missing; deletion protected"})
+				} else if p.DeleteRemote {
 					ops = append(ops, Op{Kind: OpTrashRemote, Path: path, Remote: r,
 						Note: "removed locally"})
 				} else {

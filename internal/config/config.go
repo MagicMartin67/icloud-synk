@@ -19,6 +19,13 @@ type Config struct {
 	// TargetDir is the local root. Drive/ and Photos/ are created inside it.
 	TargetDir string `json:"target_dir"`
 
+	// DriveSubfolder limits Drive sync to a relative path inside iCloud Drive.
+	// Empty means the entire iCloud Drive (the original behaviour).
+	DriveSubfolder string `json:"drive_subfolder"`
+
+	// ProtectDeletions leaves one-sided absences untouched when the path was synced before.
+	ProtectDeletions bool `json:"protect_deletions"`
+
 	SyncDrive  bool `json:"sync_drive"`
 	SyncPhotos bool `json:"sync_photos"`
 
@@ -86,16 +93,17 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 // Defaults returns a Config with every non-path field populated.
 func Defaults() *Config {
 	return &Config{
-		SyncDrive:      true,
-		SyncPhotos:     true,
-		PollInterval:   Duration(30 * time.Second),
-		PhotosInterval: Duration(15 * time.Minute),
-		Debounce:       Duration(2 * time.Second),
-		Workers:        4,
-		DeleteRemote:   true,
-		DeleteLocal:    true,
-		Conflict:       "both",
-		Notify:         true,
+		SyncDrive:        true,
+		SyncPhotos:       true,
+		PollInterval:     Duration(30 * time.Second),
+		PhotosInterval:   Duration(15 * time.Minute),
+		Debounce:         Duration(2 * time.Second),
+		Workers:          4,
+		DeleteRemote:     true,
+		DeleteLocal:      true,
+		ProtectDeletions: true,
+		Conflict:         "both",
+		Notify:           true,
 		Exclude: []string{
 			".icloud-synk", ".DS_Store", "*.part", "*.crdownload", "*.partial",
 			".goutputstream-*", "~$*", ".~lock.*", "*.swp", "4913", ".Trash-*",
@@ -181,6 +189,16 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.TargetDir = abs
+	if c.DriveSubfolder != "" {
+		if strings.HasPrefix(c.DriveSubfolder, "/") || strings.Contains(c.DriveSubfolder, "\\") {
+			return fmt.Errorf("drive_subfolder must be a relative iCloud Drive path using '/' separators")
+		}
+		for _, part := range strings.Split(c.DriveSubfolder, "/") {
+			if part == "" || part == "." || part == ".." {
+				return fmt.Errorf("drive_subfolder contains an invalid path component %q", part)
+			}
+		}
+	}
 	if c.Workers < 1 {
 		c.Workers = 1
 	}

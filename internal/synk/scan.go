@@ -3,6 +3,7 @@ package synk
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -31,17 +32,14 @@ type Scanner struct {
 // Scan returns every file and directory below Root. Symlinks are reported as
 // skipped rather than followed: iCloud has no equivalent, and following them
 // risks copying half the filesystem into the cloud.
-func (s *Scanner) Scan() (files map[string]LocalFile, skipped []string, err error) {
+func (s *Scanner) Scan() (files map[string]LocalFile, skipped, oversized []string, err error) {
 	files = make(map[string]LocalFile)
 	rootFS := s.Root
 	err = filepath.WalkDir(rootFS, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			// An unreadable directory should not abort the whole pass.
-			if p == rootFS {
-				return walkErr
-			}
-			skipped = append(skipped, relSlash(rootFS, p)+" ("+walkErr.Error()+")")
-			return nil
+			// An incomplete local inventory must abort the scan. Continuing
+			// could make existing files appear deleted and trigger unsafe actions.
+			return fmt.Errorf("walking %s: %w", p, walkErr)
 		}
 		if p == rootFS {
 			return nil
@@ -63,11 +61,10 @@ func (s *Scanner) Scan() (files map[string]LocalFile, skipped []string, err erro
 		}
 		info, statErr := d.Info()
 		if statErr != nil {
-			skipped = append(skipped, rel+" ("+statErr.Error()+")")
-			return nil
+			return fmt.Errorf("reading file information for %s: %w", p, statErr)
 		}
 		if !d.IsDir() && s.MaxSize > 0 && info.Size() > s.MaxSize {
-			skipped = append(skipped, rel+" (larger than max_file_size)")
+			oversized = append(oversized, rel)
 			return nil
 		}
 		files[rel] = LocalFile{
@@ -78,7 +75,7 @@ func (s *Scanner) Scan() (files map[string]LocalFile, skipped []string, err erro
 		}
 		return nil
 	})
-	return files, skipped, err
+	return files, skipped, oversized, err
 }
 
 // isExcluded matches every path segment against the exclude patterns, so

@@ -4,6 +4,7 @@ package synk
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -45,10 +46,12 @@ type PhotoEntry struct {
 // State is the on-disk sync database. All access is mutex-guarded because the
 // worker pool updates it concurrently.
 type State struct {
-	mu    sync.Mutex
-	path  string
-	dirty bool
-	data  stateFile
+	mu       sync.Mutex
+	saveMu   sync.Mutex
+	path     string
+	dirty    bool
+	revision uint64
+	data     stateFile
 }
 
 type stateFile struct {
@@ -76,11 +79,20 @@ func LoadState(path string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var f stateFile
 	if err := json.Unmarshal(raw, &f); err != nil {
-		// A corrupt state file must not wedge the daemon: starting from an
-		// empty state is safe (it only re-verifies existing files).
-		return s, nil
+		return nil, fmt.Errorf("load sync state %s: invalid JSON: %w", path, err)
+	}
+
+	if f.Drive == nil {
+		f.Drive = map[string]*Entry{}
+	}
+	if f.Version != stateVersion {
+		return nil, fmt.Errorf(
+			"load sync state %s: unsupported state version %d (supported: %d)",
+			path, f.Version, stateVersion,
+		)
 	}
 	if f.Drive == nil {
 		f.Drive = map[string]*Entry{}
@@ -88,7 +100,6 @@ func LoadState(path string) (*State, error) {
 	if f.Photos == nil {
 		f.Photos = map[string]*PhotoEntry{}
 	}
-	f.Version = stateVersion
 	s.data = f
 	return s, nil
 }
@@ -111,6 +122,7 @@ func (s *State) PutDrive(path string, e Entry) {
 	cp := e
 	s.data.Drive[path] = &cp
 	s.dirty = true
+	s.revision++
 }
 
 // DeleteDrive forgets a path.
@@ -119,6 +131,7 @@ func (s *State) DeleteDrive(path string) {
 	defer s.mu.Unlock()
 	delete(s.data.Drive, path)
 	s.dirty = true
+	s.revision++
 }
 
 // Photo returns the record of a downloaded photo.
@@ -139,6 +152,7 @@ func (s *State) PutPhoto(id string, e PhotoEntry) {
 	cp := e
 	s.data.Photos[id] = &cp
 	s.dirty = true
+	s.revision++
 }
 
 // PhotoPaths returns the set of local paths already used by photos, so a name
@@ -173,44 +187,60 @@ func (s *State) MarkSynced(t time.Time) {
 	defer s.mu.Unlock()
 	s.data.SyncedAt = t
 	s.dirty = true
+	s.revision++
 }
 
 // Save atomically writes the state if anything changed.
 func (s *State) Save() error {
+	// Serialize save operations so an older snapshot cannot overwrite a newer one.
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.Lock()
 	if !s.dirty {
 		s.mu.Unlock()
 		return nil
 	}
+
+	revision := s.revision
 	s.data.Updated = time.Now()
 	raw, err := json.Marshal(&s.data)
-	s.dirty = false
 	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// A unique temp name keeps concurrent savers (Drive and photo passes) from
-	// clobbering each other's partial file.
-	f, err := os.CreateTemp(filepath.Dir(s.path), ".state-*.tmp")
+
+	f, err := os.CreateTemp(dir, ".state-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
+	defer os.Remove(tmp)
+
 	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
 		return err
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
-		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if s.revision == revision {
+		s.dirty = false
+	}
+	s.mu.Unlock()
+
+	return nil
 }

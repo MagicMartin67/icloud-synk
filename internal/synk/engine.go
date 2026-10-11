@@ -24,9 +24,22 @@ import (
 const folderBatch = 30
 
 // Engine performs synchronisation passes.
+type driveClient interface {
+	ListFolders(ctx context.Context, drivewsIDs []string) ([]icloud.Folder, error)
+	Download(ctx context.Context, item icloud.Item, dst io.Writer) (int64, error)
+	Upload(ctx context.Context, zone, parentDocwsID, name string, size int64, modTime time.Time, src io.Reader) error
+	CreateFolder(ctx context.Context, parentDrivewsID, name string) (icloud.Item, error)
+	MoveToTrash(ctx context.Context, items []icloud.Item) error
+	ListPhotos(ctx context.Context, pageSize int, fn func(icloud.Photo) error) error
+	DownloadPhoto(ctx context.Context, p icloud.Photo, w io.Writer) (int64, error)
+}
+
+// renameFile is replaceable in tests to simulate filesystem errors.
+var renameFile = os.Rename
+
 type Engine struct {
 	cfg *config.Config
-	cl  *icloud.Client
+	cl  driveClient
 	st  *State
 	log *slog.Logger
 
@@ -98,12 +111,18 @@ func (e *Engine) SyncDrive(ctx context.Context) (Stats, error) {
 		return stats, err
 	}
 
-	local, skipped, err := e.scanner.Scan()
+	local, skipped, oversized, err := e.scanner.Scan()
 	if err != nil {
 		return stats, fmt.Errorf("scanning %s: %w", e.cfg.DriveDir(), err)
 	}
 	for _, s := range skipped {
 		e.log.Debug("skipping local entry", "path", s)
+	}
+
+	protectedPaths := make(map[string]bool, len(oversized))
+	for _, p := range oversized {
+		protectedPaths[p] = true
+		e.log.Warn("protecting oversized local file from reconciliation actions", "path", p)
 	}
 
 	remoteFiles, remoteDirs, err := e.fetchRemote(ctx)
@@ -127,12 +146,25 @@ func (e *Engine) SyncDrive(ctx context.Context) (Stats, error) {
 		"local", len(local), "remote_files", len(remoteFiles), "remote_dirs", len(remoteDirs))
 
 	ops := Reconcile(local, remote, e.st.Drive(), Policy{
-		DeleteLocal:  e.cfg.DeleteLocal,
-		DeleteRemote: e.cfg.DeleteRemote,
-		Conflict:     e.cfg.Conflict,
+		DeleteLocal:      e.cfg.DeleteLocal,
+		DeleteRemote:     e.cfg.DeleteRemote,
+		ProtectDeletions: e.cfg.ProtectDeletions,
+		ProtectedPaths:   protectedPaths,
+		Conflict:         e.cfg.Conflict,
 	})
 
 	e.log.Debug("drive pass planned", "operations", len(ops))
+
+	if e.dryRun {
+		for _, op := range ops {
+			e.log.Info("would "+string(op.Kind),
+				"path", op.Path,
+				"note", op.Note)
+			stats.Skipped++
+		}
+		return stats, nil
+	}
+
 	stats = e.apply(ctx, ops)
 	if err := e.st.Save(); err != nil {
 		e.log.Warn("saving state", "err", err)
@@ -147,7 +179,18 @@ func (e *Engine) fetchRemote(ctx context.Context) (files, dirs map[string]icloud
 	dirs = map[string]icloud.Item{}
 
 	// pending maps a drivewsid awaiting expansion to its relative path.
-	pending := map[string]string{icloud.RootFolderID: ""}
+	// When a subfolder is configured, resolve it first and treat it as the
+	// local mirror root; never walk or reconcile its siblings.
+	rootID := icloud.RootFolderID
+	if e.cfg.DriveSubfolder != "" {
+		root, err := e.resolveRemoteSubfolder(ctx, e.cfg.DriveSubfolder)
+		if err != nil {
+			return nil, nil, err
+		}
+		rootID = root.DrivewsID
+		dirs[""] = root
+	}
+	pending := map[string]string{rootID: ""}
 
 	for len(pending) > 0 {
 		if err := ctx.Err(); err != nil {
@@ -195,15 +238,57 @@ func (e *Engine) fetchRemote(ctx context.Context) (files, dirs map[string]icloud
 				files[rel] = it
 			}
 		}
-		// Folders Apple did not return (deleted mid-walk) must not loop forever.
+		// Every requested folder must be returned. Otherwise the remote
+		// inventory is incomplete, so abort instead of syncing against it.
 		for _, id := range ids {
-			delete(pending, id)
+			if _, ok := pending[id]; ok {
+				return nil, nil, fmt.Errorf(
+					"iCloud returned no result for requested folder %q; refusing to sync with incomplete inventory",
+					id,
+				)
+			}
 		}
+
 		for id, rel := range next {
 			pending[id] = rel
 		}
 	}
 	return files, dirs, nil
+}
+
+// resolveRemoteSubfolder finds a configured path beneath the iCloud Drive root.
+// It deliberately fails if any component is missing or is not a folder; uploads
+// must never silently create the configured mirror root at the wrong location.
+func (e *Engine) resolveRemoteSubfolder(ctx context.Context, subfolder string) (icloud.Item, error) {
+	currentID := icloud.RootFolderID
+	var current icloud.Item
+	for _, component := range strings.Split(subfolder, "/") {
+		folders, err := e.cl.ListFolders(ctx, []string{currentID})
+		if err != nil {
+			return icloud.Item{}, fmt.Errorf("locating iCloud Drive folder %q: %w", subfolder, err)
+		}
+		found := false
+		for _, folder := range folders {
+			if folder.DrivewsID != currentID {
+				continue
+			}
+			for _, item := range folder.Items {
+				if sanitizeName(item.FullName()) == component && item.IsDir() {
+					current = item
+					currentID = item.DrivewsID
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			return icloud.Item{}, fmt.Errorf("configured iCloud Drive folder %q was not found (missing folder %q); refusing to sync", subfolder, component)
+		}
+	}
+	return current, nil
 }
 
 // sanitizeName makes an iCloud name usable as a single path segment.
@@ -262,6 +347,11 @@ func (e *Engine) apply(ctx context.Context, ops []Op) Stats {
 			transfers = append(transfers, op)
 
 		case OpRecord:
+			if e.dryRun {
+				e.log.Info("would update sync state", "path", op.Path)
+				stats.Skipped++
+				continue
+			}
 			e.recordSynced(op)
 
 		case OpTrashLocal:
@@ -275,6 +365,17 @@ func (e *Engine) apply(ctx context.Context, ops []Op) Stats {
 			stats.Skipped++
 
 		case OpForget:
+			if e.dryRun {
+				e.log.Info("would forget sync state", "path", op.Path)
+				stats.Skipped++
+				continue
+			}
+			if e.cfg.ProtectDeletions {
+				e.log.Warn("preserving sync state because deletion protection is enabled",
+					"path", op.Path)
+				stats.Skipped++
+				continue
+			}
 			e.st.DeleteDrive(op.Path)
 		}
 	}
@@ -416,22 +517,6 @@ func (e *Engine) download(ctx context.Context, op Op, passStamp string) (int64, 
 		return 0, err
 	}
 
-	// Preserve the local version when it is the conflict loser.
-	if op.Conflict && op.Winner == WinnerRemote {
-		switch e.cfg.Conflict {
-		case "both":
-			cp := conflictPath(dst, passStamp)
-			if err := os.Rename(dst, cp); err != nil && !os.IsNotExist(err) {
-				return 0, fmt.Errorf("saving conflicting local copy: %w", err)
-			}
-			e.log.Warn("kept local version alongside", "path", op.Path, "as", filepath.Base(cp))
-		case "remote":
-			if err := e.moveToLocalTrash(op.Path, passStamp); err != nil && !os.IsNotExist(err) {
-				return 0, fmt.Errorf("moving local version to trash: %w", err)
-			}
-		}
-	}
-
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".icloud-synk-*.part")
 	if err != nil {
 		return 0, err
@@ -447,14 +532,113 @@ func (e *Engine) download(ctx context.Context, op Op, passStamp string) (int64, 
 	if err != nil {
 		return 0, err
 	}
+	if op.Remote.Size > 0 && n != op.Remote.Size {
+		return 0, fmt.Errorf(
+			"incomplete download for %s: received %d bytes, expected %d",
+			op.Path, n, op.Remote.Size,
+		)
+	}
 	if err := tmp.Close(); err != nil {
 		return 0, err
 	}
+
+	remoteHash := hex.EncodeToString(h.Sum(nil))
+
+	// If the downloaded content matches the existing local file, preserve
+	// the local file and its timestamp. Only refresh the sync metadata.
+	if !op.Conflict {
+		if prev, ok := e.st.Drive()[op.Path]; ok &&
+			prev.SHA256 != "" &&
+			prev.SHA256 == remoteHash {
+			info, statErr := os.Stat(dst)
+			if statErr == nil && info.Mode().IsRegular() {
+				localHash, hashErr := fileSHA256(dst)
+				if hashErr == nil && localHash == remoteHash {
+					e.st.PutDrive(op.Path, Entry{
+						Size:        info.Size(),
+						LocalMTime:  info.ModTime(),
+						SHA256:      remoteHash,
+						Etag:        op.Remote.Etag,
+						DrivewsID:   op.Remote.DrivewsID,
+						DocwsID:     op.Remote.DocwsID,
+						Zone:        op.Remote.Zone,
+						RemoteMTime: op.Remote.ModTime(),
+					})
+					return 0, nil
+				}
+			}
+		}
+	}
+
+	// Preserve the local version only after confirming the remote content
+	// differs and the download has completed successfully.
+	// Prepare the downloaded file before touching the existing local file.
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		return 0, err
 	}
-	if err := os.Rename(tmpName, dst); err != nil {
+
+	// For conflicts, preserve the original version and restore it if the
+	// final replacement fails.
+	var backupPath string
+	if op.Conflict && op.Winner == WinnerRemote {
+		switch e.cfg.Conflict {
+		case "both":
+			var err error
+			backupPath, err = createConflictCopy(dst, conflictPath(dst, passStamp))
+			if err != nil && !os.IsNotExist(err) {
+				return 0, fmt.Errorf("preserving local conflict version: %w", err)
+			}
+		case "remote":
+			backupPath = filepath.Join(
+				filepath.Dir(dst),
+				"."+filepath.Base(dst)+".icloud-synk-backup-"+passStamp,
+			)
+		}
+
+		if backupPath != "" && e.cfg.Conflict != "both" {
+			if err := renameFile(dst, backupPath); err != nil && !os.IsNotExist(err) {
+				return 0, fmt.Errorf("preserving local conflict version: %w", err)
+			}
+		}
+	}
+
+	if err := renameFile(tmpName, dst); err != nil {
+		// If replacement failed, restore the original file when possible.
+		if backupPath != "" {
+			if e.cfg.Conflict == "both" {
+				// The original remains at dst; remove only the extra hard link.
+				if removeErr := os.Remove(backupPath); removeErr != nil && !os.IsNotExist(removeErr) {
+					return 0, fmt.Errorf(
+						"replacing downloaded file failed: %v; removing temporary conflict copy failed: %w",
+						err, removeErr,
+					)
+				}
+			} else if restoreErr := renameFile(backupPath, dst); restoreErr != nil {
+				return 0, fmt.Errorf(
+					"replacing downloaded file failed: %v; restoring original file failed: %w",
+					err, restoreErr,
+				)
+			}
+		}
 		return 0, err
+	}
+
+	if backupPath != "" {
+		if e.cfg.Conflict == "both" {
+			e.log.Warn(
+				"kept local version alongside",
+				"path", op.Path,
+				"as", filepath.Base(backupPath),
+			)
+		} else if e.cfg.Conflict == "remote" {
+			if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+				e.log.Warn(
+					"could not remove temporary conflict backup",
+					"path", backupPath,
+					"err", err,
+				)
+			}
+		}
 	}
 
 	mtime := op.Remote.ModTime()
@@ -471,7 +655,7 @@ func (e *Engine) download(ctx context.Context, op Op, passStamp string) (int64, 
 	e.st.PutDrive(op.Path, Entry{
 		Size:        info.Size(),
 		LocalMTime:  info.ModTime(),
-		SHA256:      hex.EncodeToString(h.Sum(nil)),
+		SHA256:      remoteHash,
 		Etag:        op.Remote.Etag,
 		DrivewsID:   op.Remote.DrivewsID,
 		DocwsID:     op.Remote.DocwsID,
@@ -499,15 +683,13 @@ func (e *Engine) upload(ctx context.Context, op Op, passStamp string) (int64, er
 		}
 	}
 
-	// The remote version loses a conflict: keep a copy next to the local file.
+	// The remote version loses a conflict: preserve it before uploading.
 	if op.Conflict && op.Winner == WinnerLocal && e.cfg.Conflict == "both" && op.Remote.DocwsID != "" {
 		cp := conflictPath(src, passStamp)
 		if err := e.downloadTo(ctx, op.Remote, cp); err != nil {
-			e.log.Warn("could not save the iCloud version of a conflict",
-				"path", op.Path, "err", err)
-		} else {
-			e.log.Warn("kept iCloud version alongside", "path", op.Path, "as", filepath.Base(cp))
+			return 0, fmt.Errorf("preserving iCloud conflict version for %q: %w", op.Path, err)
 		}
+		e.log.Warn("kept iCloud version alongside", "path", op.Path, "as", filepath.Base(cp))
 	}
 
 	parentRel := path.Dir(op.Path)
@@ -569,7 +751,26 @@ func (e *Engine) downloadTo(ctx context.Context, item icloud.Item, dst string) e
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, dst)
+
+	// Create the destination without overwriting an existing file.
+	// The temporary file is in the same directory, so a hard link is atomic.
+	for i := 0; ; i++ {
+		candidate := dst
+		if i > 0 {
+			base := filepath.Base(dst)
+			ext := filepath.Ext(base)
+			stem := strings.TrimSuffix(base, ext)
+			candidate = filepath.Join(filepath.Dir(dst), fmt.Sprintf("%s (%d)%s", stem, i, ext))
+		}
+
+		if err := os.Link(tmpName, candidate); err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return fmt.Errorf("creating conflict copy without overwriting %q: %w", candidate, err)
+		}
+		return nil
+	}
 }
 
 // mkdirRemote creates a folder (and any missing ancestors) in iCloud.
@@ -772,6 +973,32 @@ func (e *Engine) refreshEtags(ctx context.Context) error {
 		}
 	}
 	return e.st.Save()
+}
+
+// createConflictCopy creates a hard link to src at a unique conflict filename.
+// It never replaces an existing destination and leaves src untouched.
+func createConflictCopy(src, preferred string) (string, error) {
+	if _, err := os.Stat(src); err != nil {
+		return "", err
+	}
+
+	for i := 0; ; i++ {
+		candidate := preferred
+		if i > 0 {
+			base := filepath.Base(preferred)
+			ext := filepath.Ext(base)
+			stem := strings.TrimSuffix(base, ext)
+			candidate = filepath.Join(filepath.Dir(preferred), fmt.Sprintf("%s (%d)%s", stem, i, ext))
+		}
+
+		if err := os.Link(src, candidate); err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", err
+		}
+		return candidate, nil
+	}
 }
 
 // conflictPath builds "name.conflict-<stamp>.ext" next to the original.

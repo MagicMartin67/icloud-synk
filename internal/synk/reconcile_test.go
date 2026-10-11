@@ -120,6 +120,29 @@ func TestReconcileConflictNewerWins(t *testing.T) {
 	}
 }
 
+func TestReconcileConflictEqualTimestampsPreferRemote(t *testing.T) {
+	sameTime := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+
+	state := map[string]Entry{
+		"a.txt": {Size: 10, LocalMTime: sameTime.Add(-time.Hour), Etag: "e1", DrivewsID: "x"},
+	}
+	local := map[string]LocalFile{
+		"a.txt": file("a.txt", 11, sameTime),
+	}
+	remote := map[string]icloud.Item{
+		"a.txt": remoteFile("a.txt", "e2", 12, sameTime),
+	}
+
+	op := findOp(t, Reconcile(local, remote, state, basePolicy), "a.txt")
+
+	if !op.Conflict {
+		t.Fatal("expected a conflict")
+	}
+	if op.Kind != OpDownload || op.Winner != WinnerRemote {
+		t.Errorf("equal timestamps: got %s winner=%s, want download/remote", op.Kind, op.Winner)
+	}
+}
+
 func TestReconcileConflictRemotePolicyAlwaysDownloads(t *testing.T) {
 	old := time.Now().Add(-time.Hour).Truncate(time.Second)
 	state := map[string]Entry{"a.txt": {Size: 10, LocalMTime: old, Etag: "e1", DrivewsID: "x"}}
@@ -150,6 +173,37 @@ func TestReconcileDeletions(t *testing.T) {
 	}
 	if got := findOp(t, ops, "gone-local.txt"); got.Kind != OpTrashRemote {
 		t.Errorf("file removed locally: got %s, want %s", got.Kind, OpTrashRemote)
+	}
+}
+
+func TestReconcileProtectsAgainstDeletionActions(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	state := map[string]Entry{
+		"gone-remote.txt": {Size: 10, LocalMTime: now, Etag: "e1", DrivewsID: "x"},
+		"gone-local.txt":  {Size: 10, LocalMTime: now, Etag: "e1", DrivewsID: "y"},
+	}
+	local := map[string]LocalFile{
+		"gone-remote.txt": file("gone-remote.txt", 10, now),
+	}
+	remote := map[string]icloud.Item{
+		"gone-local.txt": remoteFile("gone-local.txt", "e1", 10, now),
+	}
+	policy := Policy{
+		DeleteLocal: true, DeleteRemote: true,
+		ProtectDeletions: true, Conflict: "both",
+	}
+
+	ops := Reconcile(local, remote, state, policy)
+	for _, op := range ops {
+		if op.Kind == OpTrashLocal || op.Kind == OpTrashRemote {
+			t.Errorf("deletion action %s planned for %q despite protection", op.Kind, op.Path)
+		}
+	}
+	if got := findOp(t, ops, "gone-remote.txt"); got.Kind != OpSkip {
+		t.Errorf("missing iCloud file: got %s, want %s", got.Kind, OpSkip)
+	}
+	if got := findOp(t, ops, "gone-local.txt"); got.Kind != OpSkip {
+		t.Errorf("missing local file: got %s, want %s", got.Kind, OpSkip)
 	}
 }
 
@@ -212,6 +266,26 @@ func TestReconcileForgetsVanishedPaths(t *testing.T) {
 	}
 }
 
+func TestReconcileProtectsVanishedPaths(t *testing.T) {
+	state := map[string]Entry{
+		"old.txt": {
+			Size: 1, LocalMTime: time.Now(), Etag: "e",
+			DrivewsID: "remote-id",
+		},
+	}
+	policy := Policy{Conflict: "both", ProtectDeletions: true}
+
+	ops := Reconcile(
+		map[string]LocalFile{},
+		map[string]icloud.Item{},
+		state,
+		policy,
+	)
+	if got := findOp(t, ops, "old.txt"); got.Kind != OpForget {
+		t.Errorf("vanished path: got %s, want %s", got.Kind, OpForget)
+	}
+}
+
 func TestReconcileSkipsPackages(t *testing.T) {
 	pkg := icloud.Item{
 		DrivewsID: "FILE::com.apple.Pages::doc",
@@ -236,5 +310,88 @@ func TestSortOpsDeletesDeepestFirst(t *testing.T) {
 		if ops[i].Path != w {
 			t.Fatalf("deletion order = %v, want %v", []Op{ops[0], ops[1], ops[2]}, want)
 		}
+	}
+}
+
+func TestReconcileProtectsPreviouslySyncedMissingFiles(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	policy := Policy{Conflict: "both", ProtectDeletions: true}
+
+	t.Run("local file missing", func(t *testing.T) {
+		remote := map[string]icloud.Item{"a.txt": remoteFile("a.txt", "e1", 10, now)}
+		state := map[string]Entry{"a.txt": {Size: 10, LocalMTime: now, Etag: "e1", DrivewsID: "remote-id"}}
+		op := findOp(t, Reconcile(map[string]LocalFile{}, remote, state, policy), "a.txt")
+		if op.Kind != OpSkip {
+			t.Fatalf("got %s, want %s", op.Kind, OpSkip)
+		}
+	})
+
+	t.Run("remote file missing", func(t *testing.T) {
+		local := map[string]LocalFile{"a.txt": file("a.txt", 10, now)}
+		state := map[string]Entry{"a.txt": {Size: 10, LocalMTime: now, Etag: "e1", DrivewsID: "remote-id"}}
+		op := findOp(t, Reconcile(local, map[string]icloud.Item{}, state, policy), "a.txt")
+		if op.Kind != OpSkip {
+			t.Fatalf("got %s, want %s", op.Kind, OpSkip)
+		}
+	})
+}
+
+func TestReconcileProtectsPreviouslySyncedMissingDirectories(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	policy := Policy{Conflict: "both", ProtectDeletions: true}
+
+	t.Run("local directory missing", func(t *testing.T) {
+		remote := map[string]icloud.Item{"folder": {DrivewsID: "dir-id", Name: "folder", Type: icloud.TypeFolder}}
+		state := map[string]Entry{"folder": {IsDir: true, DrivewsID: "dir-id", LocalMTime: now}}
+		op := findOp(t, Reconcile(map[string]LocalFile{}, remote, state, policy), "folder")
+		if op.Kind != OpSkip {
+			t.Fatalf("got %s, want %s", op.Kind, OpSkip)
+		}
+	})
+
+	t.Run("remote directory missing", func(t *testing.T) {
+		local := map[string]LocalFile{"folder": {Path: "folder", IsDir: true, MTime: now}}
+		state := map[string]Entry{"folder": {IsDir: true, DrivewsID: "dir-id", LocalMTime: now}}
+		op := findOp(t, Reconcile(local, map[string]icloud.Item{}, state, policy), "folder")
+		if op.Kind != OpSkip {
+			t.Fatalf("got %s, want %s", op.Kind, OpSkip)
+		}
+	})
+}
+
+func TestReconcileProtectsOversizedLocalFile(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	state := map[string]Entry{
+		"large.bin": {
+			Size: 100, LocalMTime: now, Etag: "e1",
+			DrivewsID: "remote-id",
+		},
+	}
+	remote := map[string]icloud.Item{
+		"large.bin": remoteFile("large.bin", "e1", 100, now),
+	}
+	policy := Policy{
+		DeleteLocal: true, DeleteRemote: true, Conflict: "both",
+		ProtectedPaths: map[string]bool{"large.bin": true},
+	}
+
+	ops := Reconcile(map[string]LocalFile{}, remote, state, policy)
+	op := findOp(t, ops, "large.bin")
+	if op.Kind != OpSkip {
+		t.Fatalf("got %s, want %s", op.Kind, OpSkip)
+	}
+	for _, op := range ops {
+		if op.Kind == OpTrashLocal || op.Kind == OpTrashRemote ||
+			op.Kind == OpDownload || op.Kind == OpUpload {
+			t.Fatalf("protected path has unsafe operation: %+v", op)
+		}
+	}
+
+	// Even if the path is missing on both sides, keep its state entry
+	// while the local scanner has explicitly protected it.
+	ops = Reconcile(map[string]LocalFile{}, map[string]icloud.Item{}, state, policy)
+	op = findOp(t, ops, "large.bin")
+	if op.Kind != OpSkip {
+		t.Fatalf("when missing on both sides, got %s, want %s", op.Kind, OpSkip)
 	}
 }

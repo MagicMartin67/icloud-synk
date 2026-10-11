@@ -20,7 +20,7 @@ func TestScannerFindsFilesAndSkipsExcluded(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "download.part"), "partial")
 
 	s := &Scanner{Root: root, Exclude: config.Defaults().Exclude}
-	files, _, err := s.Scan()
+	files, _, _, err := s.Scan()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestScannerSkipsSymlinks(t *testing.T) {
 	}
 
 	s := &Scanner{Root: root}
-	files, skipped, err := s.Scan()
+	files, skipped, _, err := s.Scan()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestScannerMaxSize(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "small.bin"), "x")
 
 	s := &Scanner{Root: root, MaxSize: 10}
-	files, skipped, err := s.Scan()
+	files, skipped, oversized, err := s.Scan()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +79,11 @@ func TestScannerMaxSize(t *testing.T) {
 	if _, ok := files["small.bin"]; !ok {
 		t.Error("small.bin should have been kept")
 	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0], "max_file_size") {
-		t.Errorf("skipped = %v, want a max_file_size note", skipped)
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %v, want no ordinary skipped entries", skipped)
+	}
+	if len(oversized) != 1 || oversized[0] != "big.bin" {
+		t.Errorf("oversized = %v, want [big.bin]", oversized)
 	}
 }
 
@@ -141,15 +144,73 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoadStateToleratesCorruption(t *testing.T) {
+func TestSaveFailureCanBeRetried(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "not-a-directory")
+
+	statePath := filepath.Join(root, "state.json")
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st.PutDrive("retry.txt", Entry{
+		Size:   7,
+		Etag:   "retry-etag",
+		SHA256: "retry-hash",
+	})
+
+	// Replace the intended parent directory with a regular file.
+	if err := os.WriteFile(blocker, []byte("blocker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st.path = filepath.Join(blocker, "state.json")
+
+	if err := st.Save(); err == nil {
+		t.Fatal("expected the first save to fail")
+	}
+
+	// Restore a valid state path and retry.
+	st.path = statePath
+	if err := st.Save(); err != nil {
+		t.Fatalf("retry save failed: %v", err)
+	}
+
+	loaded, err := LoadState(statePath)
+	if err != nil {
+		t.Fatalf("could not load state after retry: %v", err)
+	}
+
+	entry, ok := loaded.Drive()["retry.txt"]
+	if !ok {
+		t.Fatal("entry was not persisted after retry")
+	}
+	if entry.Etag != "retry-etag" || entry.SHA256 != "retry-hash" {
+		t.Fatalf("unexpected persisted entry: %+v", entry)
+	}
+}
+
+func TestLoadStateRejectsCorruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	mustWrite(t, path, "{not json")
-	st, err := LoadState(path)
-	if err != nil {
-		t.Fatalf("corrupt state should not be fatal: %v", err)
+
+	_, err := LoadState(path)
+	if err == nil {
+		t.Fatal("expected an error for a corrupted state file")
 	}
-	if d, p := st.Counts(); d != 0 || p != 0 {
-		t.Errorf("counts = %d/%d, want an empty state", d, p)
+}
+
+func TestLoadStateRejectsUnknownVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	mustWrite(t, path, `{
+		"version": 999,
+		"drive": {},
+		"photos": {}
+	}`)
+
+	_, err := LoadState(path)
+	if err == nil {
+		t.Fatal("expected an error for an unsupported state version")
 	}
 }
 
