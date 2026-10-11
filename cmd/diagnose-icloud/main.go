@@ -32,6 +32,7 @@ func main() {
 
 	target := "Tappe/Dokumente sync NAS"
 	currentID := icloud.RootFolderID
+	fmt.Printf("iCloud-Root-ID: %s\n", currentID)
 
 	for _, component := range strings.Split(target, "/") {
 		folders, err := client.ListFolders(ctx, []string{currentID})
@@ -46,6 +47,7 @@ func main() {
 			}
 			for _, item := range folder.Items {
 				if item.FullName() == component && item.IsDir() {
+					fmt.Printf("Ordner gefunden: %s | DrivewsID: %s | DocwsID: %s\n", item.FullName(), item.DrivewsID, item.DocwsID)
 					currentID = item.DrivewsID
 					found = true
 					break
@@ -85,20 +87,24 @@ func main() {
 			if folder.DrivewsID != id {
 				continue
 			}
+			fmt.Printf("Untersuche Ordner-ID: %s | Name: %s\n", folder.DrivewsID, folder.Name)
 			for _, item := range folder.Items {
 				if item.IsDir() {
+					fmt.Printf("Unterordner: %s | DrivewsID: %s | DocwsID: %s\n", item.FullName(), item.DrivewsID, item.DocwsID)
 					queue = append(queue, item.DrivewsID)
 					continue
 				}
 
 				fmt.Printf(
-					"Datei: %s | Typ: %s | Größe: %d | ETag: %s | Geändert: %s | ItemCount: %d\n",
+					"Datei: %s | Typ: %s | Größe: %d | ETag: %s | Geändert: %s | ItemCount: %d | DrivewsID: %s | DocwsID: %s\n",
 					item.FullName(),
 					item.Type,
 					item.Size,
 					item.Etag,
 					item.ModTime().Format(time.RFC3339),
 					item.ItemCount,
+					item.DrivewsID,
+					item.DocwsID,
 				)
 			}
 		}
