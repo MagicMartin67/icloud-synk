@@ -467,9 +467,15 @@ func cmdSync(args []string) error {
 		}
 		fmt.Printf("Photos: %s\n", stats.String())
 	}
-	if !*dryRun {
-		st.MarkSynced(time.Now())
+	return finishSync(st, *dryRun)
+}
+
+// finishSync leaves the state untouched during a dry run.
+func finishSync(st *synk.State, dryRun bool) error {
+	if dryRun {
+		return nil
 	}
+	st.MarkSynced(time.Now())
 	return st.Save()
 }
 
