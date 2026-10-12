@@ -709,9 +709,46 @@ func (e *Engine) upload(ctx context.Context, op Op, passStamp string) (int64, er
 
 	h := sha256.New()
 	name := path.Base(op.Path)
-	if err := e.cl.Upload(ctx, parent.Zone, parent.DocwsID, name, info.Size(), info.ModTime(),
-		io.TeeReader(f, h)); err != nil {
-		return 0, err
+
+	var uploadErr error
+	delays := []time.Duration{0, time.Second, 3 * time.Second}
+
+	for attempt, delay := range delays {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return 0, err
+		}
+		h.Reset()
+
+		uploadErr = e.cl.Upload(
+			ctx,
+			parent.Zone,
+			parent.DocwsID,
+			name,
+			info.Size(),
+			info.ModTime(),
+			io.TeeReader(f, h),
+		)
+
+		if uploadErr == nil {
+			break
+		}
+
+		if !strings.Contains(uploadErr.Error(), "ZONE_BUSY") {
+			break
+		}
+
+		e.log.Warn("iCloud zone busy, retrying upload",
+			"path", op.Path,
+			"attempt", attempt+1,
+		)
+	}
+
+	if uploadErr != nil {
+		return 0, uploadErr
 	}
 
 	// The new etag is unknown until the folder is re-listed; refreshEtags does
