@@ -2,6 +2,38 @@
 
 *По-русски: [README_RU.md](README_RU.md)*
 
+## MagicMartin fork enhancements (v0.1.1)
+
+This fork contains additional stability and safety improvements developed and
+tested on Ubuntu Linux.
+
+
+### Added features
+
+- **Safe deletion protection**
+  - Previously synchronized files are protected from accidental deletion.
+  - Missing files are detected and handled safely.
+  - Controlled by `protect_deletions`.
+
+- **Three-way conflict handling**
+  - Synchronisation compares:
+    - local files
+    - iCloud files
+    - previous sync state
+  - With `conflict: "both"` both versions are preserved.
+  - Conflicting versions receive a timestamp suffix.
+
+- **Improved iCloud Drive folder scoping**
+  - Synchronisation can be limited to a specific iCloud Drive folder.
+
+  Example:
+
+  ```json
+  {
+    "drive_subfolder": "Tappe/Dokumente sync NAS"
+  }
+
+
 A daemon for Ubuntu (Go, no CGO) that keeps a local folder in sync with iCloud:
 
 * **iCloud Drive — two-way, as you work.** Drop a file into the folder and it goes to the
