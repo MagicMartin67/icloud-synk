@@ -562,6 +562,7 @@ func daemonSyncStatus() string {
 
 func syncStatusFromJournal(journal string) string {
 	status := "Unbekannt"
+	var latestEvent time.Time
 	var lastStart time.Time
 
 	for _, line := range strings.Split(journal, "\n") {
@@ -575,21 +576,36 @@ func syncStatusFromJournal(journal string) string {
 			continue
 		}
 
+		messageStatus := ""
 		switch {
 		case strings.Contains(line, `msg="drive pass started"`):
-			status = "Läuft"
-			lastStart = timestamp
+			messageStatus = "Läuft"
 		case strings.Contains(line, `msg="drive pass completed"`):
-			status = "Wartet auf nächsten Durchlauf"
+			messageStatus = "Wartet auf nächsten Durchlauf"
 		case strings.Contains(line, `msg="drive pass failed"`):
-			status = "Letzter Durchlauf fehlgeschlagen"
+			messageStatus = "Letzter Durchlauf fehlgeschlagen"
 		case strings.Contains(line, `msg="drive pass skipped"`):
-			status = "Durchlauf übersprungen"
+			messageStatus = "Durchlauf übersprungen"
+		default:
+			continue
+		}
+
+		if timestamp.Before(latestEvent) {
+			continue
+		}
+
+		latestEvent = timestamp
+		status = messageStatus
+		if messageStatus == "Läuft" {
+			lastStart = timestamp
 		}
 	}
 
-	if status == "Läuft" && (lastStart.IsZero() || time.Since(lastStart) > 2*time.Minute) {
-		return "Unbekannt"
+	if status == "Läuft" {
+		now := time.Now()
+		if lastStart.IsZero() || lastStart.After(now) || now.Sub(lastStart) > 2*time.Minute {
+			return "Unbekannt"
+		}
 	}
 
 	return status

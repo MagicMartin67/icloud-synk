@@ -82,6 +82,28 @@ func TestSyncStatusFromJournal(t *testing.T) {
 			"Wartet auf nächsten Durchlauf",
 		},
 		{
+			"equal timestamps",
+			now.Format(time.RFC3339) + ` host service level=INFO msg="drive pass completed"` + "\n" +
+				now.Format(time.RFC3339) + ` host service level=INFO msg="drive pass started"`,
+			"Läuft",
+		},
+		{
+			"unsorted events",
+			event(5*time.Second, `level=INFO msg="drive pass completed"`) + "\n" +
+				event(10*time.Second, `level=INFO msg="drive pass started"`),
+			"Wartet auf nächsten Durchlauf",
+		},
+		{
+			"invalid timestamp",
+			`not-a-time host service level=INFO msg="drive pass started"`,
+			"Unbekannt",
+		},
+		{
+			"future start",
+			time.Now().Add(30*time.Second).Format(time.RFC3339) + ` host service level=INFO msg="drive pass started"`,
+			"Unbekannt",
+		},
+		{
 			"success followed by newer failure",
 			event(10*time.Second, `level=INFO msg="drive pass started"`) + "\n" +
 				event(8*time.Second, `level=INFO msg="drive pass completed"`) + "\n" +
