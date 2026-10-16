@@ -534,8 +534,70 @@ func cmdDaemon(args []string) error {
 
 // ------------------------------------------------------------------ status
 
+// daemonSyncStatus reads recent events from the currently running user service.
+func daemonSyncStatus() string {
+	pidOut, err := exec.Command(
+		"systemctl", "--user", "show", "icloud-synk.service",
+		"-p", "MainPID", "--value",
+	).Output()
+	if err != nil {
+		return "Unbekannt"
+	}
+
+	pid := strings.TrimSpace(string(pidOut))
+	if pid == "" || pid == "0" {
+		return "Unbekannt"
+	}
+
+	out, err := exec.Command(
+		"journalctl", "--user", "-u", "icloud-synk.service",
+		"_PID="+pid, "--since=5 minutes ago", "-n", "50", "--no-pager", "-o", "short-iso",
+	).Output()
+	if err != nil {
+		return "Unbekannt"
+	}
+
+	return syncStatusFromJournal(string(out))
+}
+
+func syncStatusFromJournal(journal string) string {
+	status := "Unbekannt"
+	var lastStart time.Time
+
+	for _, line := range strings.Split(journal, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		timestamp, err := time.Parse(time.RFC3339, fields[0])
+		if err != nil {
+			continue
+		}
+
+		switch {
+		case strings.Contains(line, `msg="drive pass started"`):
+			status = "Läuft"
+			lastStart = timestamp
+		case strings.Contains(line, `msg="drive pass completed"`):
+			status = "Wartet auf nächsten Durchlauf"
+		case strings.Contains(line, `msg="drive pass failed"`):
+			status = "Letzter Durchlauf fehlgeschlagen"
+		case strings.Contains(line, `msg="drive pass skipped"`):
+			status = "Durchlauf übersprungen"
+		}
+	}
+
+	if status == "Läuft" && (lastStart.IsZero() || time.Since(lastStart) > 2*time.Minute) {
+		return "Unbekannt"
+	}
+
+	return status
+}
+
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	check := fs.Bool("check", false, "verify the iCloud session online")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -563,6 +625,7 @@ func cmdStatus(args []string) error {
 		}
 		fmt.Printf("Daemon:        %s\n", state)
 	}
+	fmt.Printf("Sync status:   %s\n", daemonSyncStatus())
 	fmt.Printf("dsid:          %s\n", orDash(info.DSID))
 	if len(info.Webservices) > 0 {
 		names := make([]string, 0, len(info.Webservices))
@@ -590,6 +653,11 @@ func cmdStatus(args []string) error {
 				}
 			}
 		}
+	}
+
+	if !*check {
+		fmt.Println("Check:         skipped (local status; use --check for online verification)")
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
