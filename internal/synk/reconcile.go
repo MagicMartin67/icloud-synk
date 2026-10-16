@@ -91,6 +91,17 @@ func Reconcile(local map[string]LocalFile, remote map[string]icloud.Item, state 
 			continue
 		}
 
+		// Internal replacement files remain visible in the inventories, but
+		// must never trigger normal synchronization or state-forgetting actions.
+		if isReplacementSiblingName(path) {
+			ops = append(ops, Op{
+				Kind: OpSkip, Path: path,
+				Local: l, Remote: r,
+				Note: "internal replacement file retained; automatic reconciliation skipped",
+			})
+			continue
+		}
+
 		switch {
 		// ---------------------------------------------------------- directories
 		case hasR && r.IsDir():

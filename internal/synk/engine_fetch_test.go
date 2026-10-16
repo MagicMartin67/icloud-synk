@@ -192,6 +192,69 @@ func TestFetchRemoteScopesConfiguredFolderAndPreservesSpaces(t *testing.T) {
 	}
 }
 
+func TestFetchRemoteRetainsReplacementFilesInInventory(t *testing.T) {
+	cfg := &config.Config{TargetDir: t.TempDir()}
+	st, err := LoadState(t.TempDir() + "/state.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	names := []string{
+		"report.icloud-synk-new-20261014T140000.123456789.txt",
+		"report.icloud-synk-backup-20261014T140000.123456789.txt",
+		"report.icloud-synk-failed-20261014T140000.123456789.txt",
+		"report.icloud-synk-notizen.txt",
+	}
+
+	client := replacementInventoryClient{names: names, now: now}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := NewEngine(cfg, nil, st, logger, true)
+	engine.cl = client
+
+	files, _, err := engine.fetchRemote(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range names {
+		if _, ok := files[name]; !ok {
+			t.Errorf("expected %q to remain in remote inventory; keys: %v",
+				name, mapKeys(files))
+		}
+	}
+}
+
+type replacementInventoryClient struct {
+	incompleteFolderClient
+	names []string
+	now   time.Time
+}
+
+func (c replacementInventoryClient) ListFolders(
+	ctx context.Context,
+	drivewsIDs []string,
+) ([]icloud.Folder, error) {
+	var result []icloud.Folder
+	for _, id := range drivewsIDs {
+		if id != icloud.RootFolderID {
+			continue
+		}
+		items := make([]icloud.Item, 0, len(c.names))
+		for i, name := range c.names {
+			items = append(items, remoteFile(name, "etag-"+name, int64(i+1), c.now))
+		}
+		result = append(result, icloud.Folder{
+			Item: icloud.Item{
+				DrivewsID: icloud.RootFolderID,
+				Type:      icloud.TypeFolder,
+			},
+			Items: items,
+		})
+	}
+	return result, nil
+}
+
 func mapKeys(items map[string]icloud.Item) []string {
 	keys := make([]string, 0, len(items))
 	for key := range items {

@@ -56,6 +56,70 @@ func TestReconcileNewFiles(t *testing.T) {
 	}
 }
 
+func TestReconcileSkipsInternalReplacementFiles(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	names := []string{
+		"report.icloud-synk-new-20261014T140000.123456789.txt",
+		"report.icloud-synk-backup-20261014T140000.123456789.txt",
+		"report.icloud-synk-failed-20261014T140000.123456789.txt",
+	}
+
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			t.Run("remote only", func(t *testing.T) {
+				ops := Reconcile(
+					map[string]LocalFile{},
+					map[string]icloud.Item{name: remoteFile(name, "e1", 10, now)},
+					map[string]Entry{},
+					basePolicy,
+				)
+				if got := findOp(t, ops, name); got.Kind != OpSkip {
+					t.Fatalf("got %s, want %s", got.Kind, OpSkip)
+				}
+			})
+
+			t.Run("local only", func(t *testing.T) {
+				ops := Reconcile(
+					map[string]LocalFile{name: file(name, 10, now)},
+					map[string]icloud.Item{},
+					map[string]Entry{},
+					basePolicy,
+				)
+				if got := findOp(t, ops, name); got.Kind != OpSkip {
+					t.Fatalf("got %s, want %s", got.Kind, OpSkip)
+				}
+			})
+
+			t.Run("both sides", func(t *testing.T) {
+				ops := Reconcile(
+					map[string]LocalFile{name: file(name, 10, now)},
+					map[string]icloud.Item{name: remoteFile(name, "e1", 10, now)},
+					map[string]Entry{},
+					basePolicy,
+				)
+				if got := findOp(t, ops, name); got.Kind != OpSkip {
+					t.Fatalf("got %s, want %s", got.Kind, OpSkip)
+				}
+			})
+
+			t.Run("state only", func(t *testing.T) {
+				state := map[string]Entry{
+					name: {Size: 10, LocalMTime: now, Etag: "e1", DrivewsID: "remote-id"},
+				}
+				ops := Reconcile(
+					map[string]LocalFile{},
+					map[string]icloud.Item{},
+					state,
+					basePolicy,
+				)
+				if got := findOp(t, ops, name); got.Kind != OpSkip {
+					t.Fatalf("got %s, want %s", got.Kind, OpSkip)
+				}
+			})
+		})
+	}
+}
+
 func TestReconcileUnchangedFileDoesNothing(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	local := map[string]LocalFile{"a.txt": file("a.txt", 10, now)}

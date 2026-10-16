@@ -119,23 +119,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 				case <-time.After(backoff):
 				}
 			}
+
+			started := time.Now()
+			d.log.Info("drive pass started")
+
 			if err := d.ensureSession(ctx); err != nil {
 				backoff = nextBackoff(backoff, maxBackoff)
+				d.log.Warn("drive pass skipped", "reason", err, "retry_in", backoff.String())
 				continue
 			}
+
 			stats, err := d.eng.SyncDrive(ctx)
 			switch {
 			case err == nil:
 				backoff = 0
-				if !stats.Empty() {
-					d.log.Info("drive pass", "result", stats.String())
-				}
+				d.log.Info("drive pass completed",
+					"result", stats.String(),
+					"duration", time.Since(started).Round(time.Millisecond).String(),
+					"empty", stats.Empty())
 				d.eng.st.MarkSynced(time.Now())
 			case errors.Is(err, context.Canceled):
 				return nil
 			default:
 				backoff = nextBackoff(backoff, maxBackoff)
-				d.log.Error("drive pass failed", "err", err, "retry_in", backoff.String())
+				d.log.Error("drive pass failed",
+					"err", err,
+					"duration", time.Since(started).Round(time.Millisecond).String(),
+					"retry_in", backoff.String())
 				d.checkAuthError(err)
 			}
 		}

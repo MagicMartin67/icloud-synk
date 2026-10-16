@@ -477,6 +477,7 @@ func (e *Engine) transfer(ctx context.Context, op Op, passStamp string) Stats {
 	var err error
 	switch op.Kind {
 	case OpDownload:
+		e.log.Info("download started", "path", op.Path)
 		var n int64
 		n, err = e.download(ctx, op, passStamp)
 		if err == nil {
@@ -485,6 +486,7 @@ func (e *Engine) transfer(ctx context.Context, op Op, passStamp string) Stats {
 			e.log.Info("downloaded", "path", op.Path, "bytes", n)
 		}
 	case OpUpload:
+		e.log.Info("upload started", "path", op.Path)
 		var n int64
 		n, err = e.upload(ctx, op, passStamp)
 		switch {
@@ -709,6 +711,37 @@ func (e *Engine) upload(ctx context.Context, op Op, passStamp string) (int64, er
 
 	h := sha256.New()
 	name := path.Base(op.Path)
+	prev := e.st.Drive()[op.Path]
+
+	// Only enter replacement mode when reconciliation identified an existing
+	// remote file at this exact path. Refresh its metadata before renaming it.
+	var existing *icloud.Item
+	if op.Remote.DrivewsID != "" && op.Remote.FullName() == name {
+		items, listErr := e.remoteChildren(ctx, parent)
+		if listErr != nil {
+			return 0, fmt.Errorf("listing remote parent before replacement: %w", listErr)
+		}
+		if item := findRemoteItem(items, name); item != nil {
+			copy := *item
+			existing = &copy
+		} else {
+			return 0, fmt.Errorf(
+				"cannot safely replace %q: expected existing remote file %q was not found; refusing normal upload",
+				op.Path, name,
+			)
+		}
+	}
+
+	uploadName := name
+	stamp := time.Now().UTC().Format("20060102T150405.000000000")
+	if existing != nil {
+		if _, ok := e.cl.(interface {
+			Rename(context.Context, icloud.Item, string) error
+		}); !ok {
+			return 0, fmt.Errorf("cannot safely replace %q: iCloud client does not support rename", op.Path)
+		}
+		uploadName = replacementSiblingName(name, "new", stamp)
+	}
 
 	var uploadErr error
 	delays := []time.Duration{0, time.Second, 3 * time.Second}
@@ -727,7 +760,7 @@ func (e *Engine) upload(ctx context.Context, op Op, passStamp string) (int64, er
 			ctx,
 			parent.Zone,
 			parent.DocwsID,
-			name,
+			uploadName,
 			info.Size(),
 			info.ModTime(),
 			io.TeeReader(f, h),
@@ -751,21 +784,260 @@ func (e *Engine) upload(ctx context.Context, op Op, passStamp string) (int64, er
 		return 0, uploadErr
 	}
 
+	var remoteAfter *icloud.Item
+	if existing != nil {
+		expectedHash := hex.EncodeToString(h.Sum(nil))
+
+		// Confirm the temporary upload and its content before touching the old
+		// file. On every failure, leave all remote versions in place.
+		tempItem, err := e.findRemoteItemRetry(ctx, parent, uploadName)
+		if err != nil {
+			return 0, fmt.Errorf("temporary upload for %q was not confirmed; existing file retained: %w", op.Path, err)
+		}
+		if err := e.verifyRemoteHash(ctx, *tempItem, expectedHash); err != nil {
+			return 0, fmt.Errorf("temporary upload for %q failed content verification; existing file retained: %w", op.Path, err)
+		}
+
+		backupName := replacementSiblingName(name, "backup", stamp)
+		backupItem, err := e.renameRemoteAndConfirm(ctx, parent, *existing, backupName)
+		if err != nil {
+			return 0, fmt.Errorf("could not confirm backup of %q; remote versions were retained where possible: %w", op.Path, err)
+		}
+
+		target, err := e.renameRemoteAndConfirm(ctx, parent, *tempItem, name)
+		if err != nil {
+			// Restore the old name only if the target name is currently absent.
+			// Never overwrite an uncertain remote state.
+			items, listErr := e.remoteChildren(ctx, parent)
+			if listErr == nil && findRemoteItem(items, name) == nil {
+				if currentBackup := findRemoteItem(items, backupName); currentBackup != nil {
+					if _, rollbackErr := e.renameRemoteAndConfirm(ctx, parent, *currentBackup, name); rollbackErr != nil {
+						e.log.Error("could not restore remote file after replacement failure",
+							"path", op.Path, "backup", backupName, "error", rollbackErr)
+					}
+				}
+			}
+			return 0, fmt.Errorf("new version could not be confirmed at original name %q; backup %q retained: %w", op.Path, backupName, err)
+		}
+
+		if verifyErr := e.verifyRemoteHash(ctx, target, expectedHash); verifyErr != nil {
+			// Preserve the unverified new version under a separate name before
+			// restoring the old version to the original path.
+			failedName := replacementSiblingName(name, "failed", stamp)
+			failedItem, moveErr := e.renameRemoteAndConfirm(ctx, parent, target, failedName)
+			if moveErr != nil {
+				e.log.Error("could not move unverified replacement aside",
+					"path", op.Path, "backup", backupName, "error", moveErr)
+				return 0, fmt.Errorf("replacement content verification failed for %q; backup %q retained, but unverified version could not be moved aside: %w",
+					op.Path, backupName, verifyErr)
+			}
+
+			items, listErr := e.remoteChildren(ctx, parent)
+			if listErr != nil {
+				e.log.Error("could not list remote folder before restoring backup",
+					"path", op.Path, "backup", backupName, "failed_version", failedItem.FullName(), "error", listErr)
+				return 0, fmt.Errorf("replacement content verification failed for %q; old backup %q and unverified version %q retained: %w",
+					op.Path, backupName, failedItem.FullName(), verifyErr)
+			}
+
+			if findRemoteItem(items, name) != nil {
+				return 0, fmt.Errorf("replacement content verification failed for %q; original name is occupied, old backup %q and unverified version %q retained: %w",
+					op.Path, backupName, failedItem.FullName(), verifyErr)
+			}
+
+			currentBackup := findRemoteItem(items, backupName)
+			if currentBackup == nil {
+				return 0, fmt.Errorf("replacement content verification failed for %q; backup %q was not found, unverified version %q retained: %w",
+					op.Path, backupName, failedItem.FullName(), verifyErr)
+			}
+
+			if _, restoreErr := e.renameRemoteAndConfirm(ctx, parent, *currentBackup, name); restoreErr != nil {
+				e.log.Error("could not restore old remote version after verification failure",
+					"path", op.Path, "backup", backupName, "failed_version", failedItem.FullName(), "error", restoreErr)
+				return 0, fmt.Errorf("replacement content verification failed for %q; backup %q and unverified version %q retained, restoration failed: %w",
+					op.Path, backupName, failedItem.FullName(), verifyErr)
+			}
+
+			return 0, fmt.Errorf("replacement content verification failed for %q; old version restored, unverified version retained as %q: %w",
+				op.Path, failedItem.FullName(), verifyErr)
+		}
+
+		remoteAfter = &target
+		e.log.Info("remote file replaced and verified; previous version retained as backup",
+			"path", op.Path, "backup", backupItem.FullName())
+	}
+
 	// The new etag is unknown until the folder is re-listed; refreshEtags does
 	// that once per pass. Keep the previous ids so the entry stays usable.
-	prev := e.st.Drive()[op.Path]
+	drivewsID, docwsID := prev.DrivewsID, prev.DocwsID
+	if remoteAfter != nil {
+		drivewsID = remoteAfter.DrivewsID
+		docwsID = remoteAfter.DocwsID
+	}
 	e.st.PutDrive(op.Path, Entry{
 		Size:        info.Size(),
 		LocalMTime:  info.ModTime(),
 		SHA256:      hex.EncodeToString(h.Sum(nil)),
 		Etag:        "", // refreshed below
-		DrivewsID:   prev.DrivewsID,
-		DocwsID:     prev.DocwsID,
+		DrivewsID:   drivewsID,
+		DocwsID:     docwsID,
 		Zone:        parent.Zone,
 		RemoteMTime: info.ModTime(),
 	})
 	e.markStale(parentRel)
 	return info.Size(), nil
+}
+
+// remoteChildren returns the direct children of a remote folder.
+func (e *Engine) remoteChildren(ctx context.Context, parent icloud.Item) ([]icloud.Item, error) {
+	if parent.DrivewsID == "" {
+		return nil, fmt.Errorf("remote parent has no drivewsid")
+	}
+	folders, err := e.cl.ListFolders(ctx, []string{parent.DrivewsID})
+	if err != nil {
+		return nil, err
+	}
+	for _, folder := range folders {
+		if folder.DrivewsID == parent.DrivewsID {
+			return folder.Items, nil
+		}
+	}
+	return nil, fmt.Errorf("remote parent %q was not returned by iCloud", parent.DrivewsID)
+}
+
+func findRemoteItem(items []icloud.Item, name string) *icloud.Item {
+	for i := range items {
+		if items[i].FullName() == name {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
+func replacementSiblingName(name, kind, stamp string) string {
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	return fmt.Sprintf("%s.icloud-synk-%s-%s%s", stem, kind, stamp, ext)
+}
+
+// findRemoteItemRetry allows for short delays in iCloud's listing visibility.
+func (e *Engine) findRemoteItemRetry(ctx context.Context, parent icloud.Item, name string) (*icloud.Item, error) {
+	delays := []time.Duration{0, 300 * time.Millisecond, 700 * time.Millisecond}
+	var lastListErr error
+	listSucceeded := false
+
+	for _, delay := range delays {
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		items, err := e.remoteChildren(ctx, parent)
+		if err != nil {
+			lastListErr = err
+			continue
+		}
+		listSucceeded = true
+		if item := findRemoteItem(items, name); item != nil {
+			copy := *item
+			return &copy, nil
+		}
+	}
+
+	if !listSucceeded && lastListErr != nil {
+		return nil, fmt.Errorf("could not confirm exact remote name %q after retries; last listing error: %w", name, lastListErr)
+	}
+	if lastListErr != nil {
+		return nil, fmt.Errorf("exact remote name %q was not found after retries; at least one listing attempt failed: %w", name, lastListErr)
+	}
+	return nil, fmt.Errorf("exact remote name %q was not found after retries", name)
+}
+
+func (e *Engine) verifyRemoteHash(ctx context.Context, item icloud.Item, expectedHash string) error {
+	h := sha256.New()
+	if _, err := e.cl.Download(ctx, item, h); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if actual != expectedHash {
+		return fmt.Errorf("SHA-256 mismatch: expected %s, received %s", expectedHash, actual)
+	}
+	return nil
+}
+
+// renameRemoteAndConfirm retries iCloud listing because a server-side rename
+// may succeed even when the API response or an immediate listing fails.
+func (e *Engine) renameRemoteAndConfirm(ctx context.Context, parent icloud.Item, item icloud.Item, newName string) (icloud.Item, error) {
+	renamer, ok := e.cl.(interface {
+		Rename(context.Context, icloud.Item, string) error
+	})
+	if !ok {
+		return icloud.Item{}, fmt.Errorf("iCloud client does not support rename")
+	}
+
+	renameErr := renamer.Rename(ctx, item, newName)
+	delays := []time.Duration{0, 300 * time.Millisecond, 700 * time.Millisecond}
+	var lastListErr error
+	var listingSucceeded bool
+
+	for attempt, delay := range delays {
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return icloud.Item{}, fmt.Errorf("confirmation of rename to %q interrupted: %w", newName, ctx.Err())
+			case <-time.After(delay):
+			}
+		}
+
+		items, listErr := e.remoteChildren(ctx, parent)
+		if listErr != nil {
+			lastListErr = listErr
+			continue
+		}
+		listingSucceeded = true
+
+		if found := findRemoteItem(items, newName); found != nil {
+			if item.DrivewsID == "" || found.DrivewsID != item.DrivewsID {
+				return icloud.Item{}, fmt.Errorf(
+					"rename to %q found an unexpected item ID: expected %q, got %q",
+					newName, item.DrivewsID, found.DrivewsID,
+				)
+			}
+			return *found, nil
+		}
+
+		if attempt < len(delays)-1 {
+			e.log.Debug("remote rename not visible yet; retrying confirmation",
+				"name", newName, "attempt", attempt+1)
+		}
+	}
+
+	if !listingSucceeded {
+		if renameErr != nil {
+			return icloud.Item{}, fmt.Errorf(
+				"rename returned %v and all confirmation listings failed: %w",
+				renameErr, lastListErr,
+			)
+		}
+		return icloud.Item{}, fmt.Errorf(
+			"rename was reported successful but all confirmation listings failed: %w",
+			lastListErr,
+		)
+	}
+
+	if renameErr != nil {
+		return icloud.Item{}, fmt.Errorf(
+			"rename to %q returned an error and the target was not found after retries: %w",
+			newName, renameErr,
+		)
+	}
+	return icloud.Item{}, fmt.Errorf(
+		"rename to %q was reported successful but the name was not found after retries",
+		newName,
+	)
 }
 
 // downloadTo fetches a remote item into an explicit local path.

@@ -260,7 +260,41 @@ func (c *Client) Rename(ctx context.Context, item Item, newName string) error {
 		entry["extension"] = ext
 	}
 	payload := map[string]any{"items": []map[string]any{entry}}
-	return c.postJSON(ctx, root+"/renameItems", nil, payload, nil)
+
+	var response json.RawMessage
+	if err := c.postJSON(ctx, root+"/renameItems", nil, payload, &response); err != nil {
+		return err
+	}
+	return validateRenameResponse(newName, response)
+}
+
+// validateRenameResponse checks the per-item result returned by renameItems.
+func validateRenameResponse(name string, raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return fmt.Errorf("icloud: renaming %q: missing operation response", name)
+	}
+
+	var response struct {
+		Items []struct {
+			Status string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return fmt.Errorf("icloud: renaming %q: invalid operation response: %w", name, err)
+	}
+	if len(response.Items) != 1 {
+		return fmt.Errorf(
+			"icloud: renaming %q: expected one operation result, got %d",
+			name, len(response.Items),
+		)
+	}
+	if response.Items[0].Status != "OK" {
+		return fmt.Errorf(
+			"icloud: renaming %q: unexpected operation status %q",
+			name, response.Items[0].Status,
+		)
+	}
+	return nil
 }
 
 // uploadTicket is the first step of an upload: Apple hands out a document id
@@ -268,6 +302,87 @@ func (c *Client) Rename(ctx context.Context, item Item, newName string) error {
 type uploadTicket struct {
 	DocumentID string `json:"document_id"`
 	URL        string `json:"url"`
+}
+
+type uploadAPIStatus struct {
+	StatusCode   *int   `json:"status_code"`
+	ErrorMessage string `json:"error_message"`
+}
+
+type uploadAPIResult struct {
+	Status   uploadAPIStatus `json:"status"`
+	Document struct {
+		Name      string `json:"name"`
+		Extension string `json:"extension"`
+	} `json:"document"`
+}
+
+// validateUploadResponse checks both the overall API status and the result
+// for the uploaded document. A successful HTTP request alone is insufficient.
+func validateUploadResponse(
+	expectedName string,
+	statusRaw, resultsRaw json.RawMessage,
+) error {
+	var overall uploadAPIStatus
+	if len(statusRaw) == 0 || string(statusRaw) == "null" {
+		return fmt.Errorf("icloud: upload %q: missing overall API status", expectedName)
+	}
+	if err := json.Unmarshal(statusRaw, &overall); err != nil {
+		return fmt.Errorf("icloud: upload %q: invalid overall API status: %w", expectedName, err)
+	}
+	if overall.StatusCode == nil {
+		return fmt.Errorf("icloud: upload %q: overall API status has no status_code", expectedName)
+	}
+	if *overall.StatusCode != 0 {
+		return fmt.Errorf(
+			"icloud: upload %q: overall API status %d: %s",
+			expectedName, *overall.StatusCode, overall.ErrorMessage,
+		)
+	}
+
+	var results []uploadAPIResult
+	if len(resultsRaw) == 0 || string(resultsRaw) == "null" {
+		return fmt.Errorf("icloud: upload %q: missing operation results", expectedName)
+	}
+	if err := json.Unmarshal(resultsRaw, &results); err != nil {
+		return fmt.Errorf("icloud: upload %q: invalid operation results: %w", expectedName, err)
+	}
+	if len(results) != 1 {
+		return fmt.Errorf(
+			"icloud: upload %q: expected one operation result, got %d",
+			expectedName, len(results),
+		)
+	}
+
+	result := results[0]
+	if result.Status.StatusCode == nil {
+		return fmt.Errorf("icloud: upload %q: operation result has no status_code", expectedName)
+	}
+	if *result.Status.StatusCode != 0 {
+		return fmt.Errorf(
+			"icloud: upload %q: operation failed with status %d: %s",
+			expectedName, *result.Status.StatusCode, result.Status.ErrorMessage,
+		)
+	}
+
+	actualName := result.Document.Name
+	if actualName == "" {
+		return fmt.Errorf("icloud: upload %q: response contains no document name", expectedName)
+	}
+	if result.Document.Extension != "" {
+		ext := strings.TrimPrefix(result.Document.Extension, ".")
+		if !strings.HasSuffix(actualName, "."+ext) {
+			actualName += "." + ext
+		}
+	}
+	if actualName != expectedName {
+		return fmt.Errorf(
+			"icloud: upload %q returned remote name %q; expected %q; "+
+				"iCloud may already have created a file under the unexpected name",
+			expectedName, actualName, expectedName,
+		)
+	}
+	return nil
 }
 
 // Upload sends a local file into the folder identified by folderDocwsID
@@ -337,12 +452,20 @@ func (c *Client) Upload(ctx context.Context, zone, folderDocwsID, name string, s
 	}
 	var updateResp struct {
 		Status  json.RawMessage `json:"status"`
-		Results []struct {
-			DocumentID string `json:"document_id"`
-		} `json:"results"`
+		Results json.RawMessage `json:"results"`
 	}
 	if err := c.postJSON(ctx, docs+"/ws/"+zone+"/update/documents", params, updatePayload, &updateResp); err != nil {
 		return fmt.Errorf("update/documents %q: %w", name, err)
+	}
+	results := string(updateResp.Results)
+	if results == "" {
+		results = "null"
+	}
+	c.logf("iCloud upload response for %q: status=%s results=%s",
+		name, string(updateResp.Status), results)
+
+	if err := validateUploadResponse(name, updateResp.Status, updateResp.Results); err != nil {
+		return err
 	}
 	return nil
 }

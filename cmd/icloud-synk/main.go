@@ -147,7 +147,12 @@ func newClient(log *slog.Logger) (*icloud.Client, error) {
 		return nil, err
 	}
 	return icloud.New(p, icloud.WithLogger(func(f string, a ...any) {
-		log.Debug(fmt.Sprintf(f, a...))
+		msg := fmt.Sprintf(f, a...)
+		if strings.HasPrefix(msg, "iCloud upload response ") {
+			log.Info(msg)
+			return
+		}
+		log.Debug(msg)
 	}))
 }
 
@@ -549,6 +554,15 @@ func cmdStatus(args []string) error {
 	fmt.Printf("Apple ID:      %s\n", orDash(info.AppleID))
 	fmt.Printf("Target folder: %s\n", orDash(cfg.TargetDir))
 	fmt.Printf("Sync:          drive=%v photos=%v\n", cfg.SyncDrive, cfg.SyncPhotos)
+	if out, err := exec.Command("systemctl", "--user", "is-active", "icloud-synk.service").CombinedOutput(); err == nil {
+		fmt.Printf("Daemon:        %s\n", strings.TrimSpace(string(out)))
+	} else {
+		state := strings.TrimSpace(string(out))
+		if state == "" {
+			state = "unknown"
+		}
+		fmt.Printf("Daemon:        %s\n", state)
+	}
 	fmt.Printf("dsid:          %s\n", orDash(info.DSID))
 	if len(info.Webservices) > 0 {
 		names := make([]string, 0, len(info.Webservices))
