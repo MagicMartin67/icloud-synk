@@ -184,6 +184,29 @@ func TestReconcileConflictNewerWins(t *testing.T) {
 	}
 }
 
+func TestReconcileConflictWhenRemoteSizeChangesAndETagDoesNot(t *testing.T) {
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	localNewer := time.Now().Truncate(time.Second)
+
+	state := map[string]Entry{
+		"a.txt": {Size: 10, LocalMTime: old, Etag: "e1", DrivewsID: "x"},
+	}
+	local := map[string]LocalFile{
+		"a.txt": file("a.txt", 11, localNewer),
+	}
+	remote := map[string]icloud.Item{
+		"a.txt": remoteFile("a.txt", "e1", 12, old),
+	}
+
+	op := findOp(t, Reconcile(local, remote, state, basePolicy), "a.txt")
+	if !op.Conflict || op.Kind != OpUpload || op.Winner != WinnerLocal {
+		t.Errorf(
+			"size change with unchanged ETag and newer local file: got %s winner=%s conflict=%v",
+			op.Kind, op.Winner, op.Conflict,
+		)
+	}
+}
+
 func TestReconcileConflictEqualTimestampsPreferRemote(t *testing.T) {
 	sameTime := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 
@@ -457,5 +480,30 @@ func TestReconcileProtectsOversizedLocalFile(t *testing.T) {
 	op = findOp(t, ops, "large.bin")
 	if op.Kind != OpSkip {
 		t.Fatalf("when missing on both sides, got %s, want %s", op.Kind, OpSkip)
+	}
+}
+
+func TestReconcileRemoteSizeChangeDownloadsWhenETagUnchanged(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	local := map[string]LocalFile{
+		"a.txt": file("a.txt", 10, now),
+	}
+	remote := map[string]icloud.Item{
+		"a.txt": remoteFile("a.txt", "e1", 52, now),
+	}
+	state := map[string]Entry{
+		"a.txt": {
+			Size: 10, LocalMTime: now, Etag: "e1", DrivewsID: "x",
+		},
+	}
+
+	ops := Reconcile(local, remote, state, basePolicy)
+	op := findOp(t, ops, "a.txt")
+
+	if op.Kind != OpDownload || op.Conflict {
+		t.Errorf(
+			"remote size change with unchanged ETag: got %s (conflict=%v), want %s without conflict",
+			op.Kind, op.Conflict, OpDownload,
+		)
 	}
 }

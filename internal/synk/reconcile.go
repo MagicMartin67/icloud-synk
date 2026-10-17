@@ -219,7 +219,7 @@ func localChanged(l LocalFile, st Entry, hasS bool) bool {
 }
 
 // remoteChanged reports whether the iCloud item differs from what we recorded.
-// The etag changes on every content change, which makes it the reliable signal.
+// ETag is the primary signal; size is a secondary signal if the ETag is unchanged.
 func remoteChanged(r icloud.Item, st Entry, hasS bool) bool {
 	if !hasS {
 		return true
@@ -227,7 +227,10 @@ func remoteChanged(r icloud.Item, st Entry, hasS bool) bool {
 	if st.Etag == "" {
 		return true
 	}
-	return r.Etag != st.Etag
+	if r.Etag != st.Etag {
+		return true
+	}
+	return r.Size != st.Size
 }
 
 // conflictOp decides who wins when both sides changed.
