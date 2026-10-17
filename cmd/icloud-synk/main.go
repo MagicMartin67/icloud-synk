@@ -31,6 +31,7 @@ const usage = `icloud-synk — synchronise a local folder with iCloud
 Usage:
   icloud-synk login   [--apple-id ID] [--dir PATH]   sign in (password + 2FA) and store the session
   icloud-synk sync    [--dry-run] [--drive] [--photos]   run one pass and exit
+  icloud-synk verify-drive [--dir PATH]                 compare local/iCloud file contents read-only
   icloud-synk daemon  [--poll 30s]                   keep syncing (inotify + polling)
   icloud-synk status                                 show session and state
   icloud-synk logout                                 forget the stored session
@@ -74,6 +75,8 @@ func main() {
 		err = cmdLogin(args)
 	case "sync":
 		err = cmdSync(args)
+	case "verify-drive":
+		err = cmdVerifyDrive(args)
 	case "daemon":
 		err = cmdDaemon(args)
 	case "status":
@@ -473,6 +476,51 @@ func cmdSync(args []string) error {
 		fmt.Printf("Photos: %s\n", stats.String())
 	}
 	return finishSync(st, *dryRun)
+}
+
+// cmdVerifyDrive performs a read-only inventory and content comparison.
+func cmdVerifyDrive(args []string) error {
+	fs := flag.NewFlagSet("verify-drive", flag.ExitOnError)
+	dir := fs.String("dir", "", "local folder to sync into")
+	verbose := fs.Bool("verbose", false, "debug logging")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	log := newLogger(*verbose)
+	cfg, err := loadConfig(*dir)
+	if err != nil {
+		return err
+	}
+	cl, err := newClient(log)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := withSignals()
+	defer cancel()
+	if err := cl.Authenticate(ctx); err != nil {
+		return authHint(err)
+	}
+	report, err := synk.VerifyDrive(ctx, cfg, cl)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Lokale Dateien: %d\nDateien in iCloud: %d\nIdentische Dateien: %d\n",
+		report.LocalFiles, report.RemoteFiles, report.Identical)
+	for _, item := range report.Differences {
+		fmt.Printf("ABWEICHUNG: %s\n", item)
+	}
+	for _, item := range report.Unverifiable {
+		fmt.Printf("NICHT PRÜFBAR: %s\n", item)
+	}
+	for _, item := range report.SkippedLocal {
+		fmt.Printf("LOKAL ÜBERSPRUNGEN: %s\n", item)
+	}
+	if report.Complete() {
+		fmt.Println("ERGEBNIS: Alle erfassten Dateien sind identisch.")
+		return nil
+	}
+	fmt.Println("ERGEBNIS: Prüfung unvollständig oder Abweichungen gefunden.")
+	return fmt.Errorf("verify-drive konnte keine vollständige Übereinstimmung bestätigen")
 }
 
 // finishSync leaves the state untouched during a dry run.
