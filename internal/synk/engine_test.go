@@ -1,11 +1,13 @@
 package synk
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,5 +257,33 @@ func TestSyncDriveDryRunDoesNotModifyStateOrTransferFiles(t *testing.T) {
 			client.uploadCalls,
 			client.trashCalls,
 		)
+	}
+}
+
+func TestLogSkipLogsInternalReplacementOnlyOncePerPath(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	engine := &Engine{
+		log: logger,
+	}
+
+	replacementNote := "internal replacement file retained; automatic reconciliation skipped"
+	engine.logSkip(Op{Kind: OpSkip, Path: "internal.txt", Note: replacementNote})
+	engine.logSkip(Op{Kind: OpSkip, Path: "internal.txt", Note: replacementNote})
+	engine.logSkip(Op{Kind: OpSkip, Path: "other.txt", Note: replacementNote})
+	engine.logSkip(Op{Kind: OpSkip, Path: "ordinary.txt", Note: "ordinary skip"})
+
+	got := output.String()
+	if count := strings.Count(got, "path=internal.txt"); count != 1 {
+		t.Errorf("internal.txt log count = %d, want 1; output: %s", count, got)
+	}
+	if count := strings.Count(got, "path=other.txt"); count != 1 {
+		t.Errorf("other.txt log count = %d, want 1; output: %s", count, got)
+	}
+	if count := strings.Count(got, "path=ordinary.txt"); count != 1 {
+		t.Errorf("ordinary.txt log count = %d, want 1; output: %s", count, got)
+	}
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "path=ordinary.txt") {
+		t.Errorf("ordinary skip should remain a warning; output: %s", got)
 	}
 }

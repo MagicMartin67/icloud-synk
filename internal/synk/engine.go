@@ -56,6 +56,10 @@ type Engine struct {
 	// re-read before the pass ends.
 	staleMu sync.Mutex
 	stale   map[string]struct{}
+
+	// replacementSkipLogged prevents repeated log messages for retained
+	// internal replacement files during the lifetime of this engine.
+	replacementSkipLogged sync.Map
 }
 
 // NewEngine wires an engine. The client must already be authenticated.
@@ -303,6 +307,18 @@ func sanitizeName(name string) string {
 
 // apply executes the operations: directories first (sequentially, so parents
 // exist), then transfers in parallel, then deletions.
+func (e *Engine) logSkip(op Op) {
+	if op.Note == "internal replacement file retained; automatic reconciliation skipped" {
+		if _, alreadyLogged := e.replacementSkipLogged.LoadOrStore(op.Path, struct{}{}); alreadyLogged {
+			return
+		}
+		e.log.Info("skipping", "path", op.Path, "reason", op.Note)
+		return
+	}
+
+	e.log.Warn("skipping", "path", op.Path, "reason", op.Note)
+}
+
 func (e *Engine) apply(ctx context.Context, ops []Op) Stats {
 	var stats Stats
 	passStamp := time.Now().Format("2006-01-02T15-04-05")
@@ -361,7 +377,7 @@ func (e *Engine) apply(ctx context.Context, ops []Op) Stats {
 			trashRemote = append(trashRemote, op)
 
 		case OpSkip:
-			e.log.Warn("skipping", "path", op.Path, "reason", op.Note)
+			e.logSkip(op)
 			stats.Skipped++
 
 		case OpForget:
