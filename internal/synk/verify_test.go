@@ -189,3 +189,180 @@ func TestVerifyDriveResolvesConfiguredSubfolder(t *testing.T) {
 		t.Fatalf("expected complete verification of configured subfolder, got %+v", report)
 	}
 }
+
+func TestVerifyDriveDetectsLocalFileMissingInRemote(t *testing.T) {
+	root := t.TempDir()
+	drive := filepath.Join(root, "Drive")
+	if err := os.MkdirAll(drive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(drive, "local-only.txt"), []byte("local"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{TargetDir: root}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item: icloud.Item{DrivewsID: icloud.RootFolderID},
+			},
+		},
+		data: map[string][]byte{},
+	}
+
+	report, err := VerifyDrive(context.Background(), cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Complete() {
+		t.Fatal("local-only file must not produce a complete verification")
+	}
+	if len(report.Differences) != 1 || !strings.Contains(report.Differences[0], "local-only.txt") {
+		t.Fatalf("expected local-only file difference, got %+v", report)
+	}
+}
+
+func TestVerifyDriveDetectsRemoteFileMissingLocally(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{TargetDir: root}
+	item := icloud.Item{
+		DrivewsID: "file-remote-only",
+		DocwsID:   "doc-remote-only",
+		Name:      "remote-only",
+		Extension: "txt",
+		Type:      icloud.TypeFile,
+		Size:      6,
+	}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item:  icloud.Item{DrivewsID: icloud.RootFolderID},
+				Items: []icloud.Item{item},
+			},
+		},
+		data: map[string][]byte{"doc-remote-only": []byte("remote")},
+	}
+
+	report, err := VerifyDrive(context.Background(), cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Complete() {
+		t.Fatal("remote-only file must not produce a complete verification")
+	}
+	if len(report.Differences) != 1 || !strings.Contains(report.Differences[0], "remote-only.txt") {
+		t.Fatalf("expected remote-only file difference, got %+v", report)
+	}
+}
+
+func TestVerifyDriveDetectsFolderDifferences(t *testing.T) {
+	t.Run("local folder missing remotely", func(t *testing.T) {
+		root := t.TempDir()
+		drive := filepath.Join(root, "Drive")
+		if err := os.MkdirAll(filepath.Join(drive, "local-folder"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{TargetDir: root}
+		client := &verifyFakeClient{
+			folders: map[string]icloud.Folder{
+				icloud.RootFolderID: {
+					Item: icloud.Item{DrivewsID: icloud.RootFolderID},
+				},
+			},
+			data: map[string][]byte{},
+		}
+
+		report, err := VerifyDrive(context.Background(), cfg, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Complete() {
+			t.Fatal("local-only folder must not produce a complete verification")
+		}
+		if len(report.Differences) != 1 || !strings.Contains(report.Differences[0], "local-folder") {
+			t.Fatalf("expected local-only folder difference, got %+v", report)
+		}
+	})
+
+	t.Run("remote folder missing locally", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{TargetDir: root}
+		client := &verifyFakeClient{
+			folders: map[string]icloud.Folder{
+				icloud.RootFolderID: {
+					Item: icloud.Item{DrivewsID: icloud.RootFolderID},
+					Items: []icloud.Item{{
+						DrivewsID: "folder-remote-only",
+						Name:      "remote-folder",
+						Type:      icloud.TypeFolder,
+					}},
+				},
+				"folder-remote-only": {
+					Item: icloud.Item{DrivewsID: "folder-remote-only"},
+				},
+			},
+			data: map[string][]byte{},
+		}
+
+		report, err := VerifyDrive(context.Background(), cfg, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Complete() {
+			t.Fatal("remote-only folder must not produce a complete verification")
+		}
+		if len(report.Differences) != 1 || !strings.Contains(report.Differences[0], "remote-folder") {
+			t.Fatalf("expected remote-only folder difference, got %+v", report)
+		}
+	})
+}
+
+func TestVerifyDriveReportsUnexpectedRemoteDownloadSize(t *testing.T) {
+	root := t.TempDir()
+	drive := filepath.Join(root, "Drive")
+	if err := os.MkdirAll(drive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(drive, "size.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{TargetDir: root}
+	item := icloud.Item{
+		DrivewsID: "file-size",
+		DocwsID:   "doc-size",
+		Name:      "size",
+		Extension: "txt",
+		Type:      icloud.TypeFile,
+		Size:      99,
+	}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item:  icloud.Item{DrivewsID: icloud.RootFolderID},
+				Items: []icloud.Item{item},
+			},
+		},
+		data: map[string][]byte{"doc-size": []byte("hello")},
+	}
+
+	report, err := VerifyDrive(context.Background(), cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Complete() {
+		t.Fatal("unexpected remote download size must not produce a complete verification")
+	}
+	if len(report.Unverifiable) != 1 || !strings.Contains(report.Unverifiable[0], "size.txt") {
+		t.Fatalf("expected remote size verification error, got %+v", report)
+	}
+}
