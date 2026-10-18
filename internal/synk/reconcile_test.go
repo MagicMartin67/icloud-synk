@@ -507,3 +507,50 @@ func TestReconcileRemoteSizeChangeDownloadsWhenETagUnchanged(t *testing.T) {
 		)
 	}
 }
+
+func TestReconcileUnchangedRemoteMetadataRecordsState(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	local := map[string]LocalFile{
+		"a.txt": file("a.txt", 10, now),
+	}
+	remote := map[string]icloud.Item{
+		"a.txt": remoteFile("a.txt", "e1", 10, now),
+	}
+	state := map[string]Entry{
+		"a.txt": {
+			Size: 10, LocalMTime: now, Etag: "e1",
+			RemoteMTime: now, DrivewsID: "x",
+		},
+	}
+
+	ops := Reconcile(local, remote, state, basePolicy)
+	op := findOp(t, ops, "a.txt")
+	if op.Kind != OpRecord {
+		t.Fatalf("unchanged remote metadata: got %s, want %s", op.Kind, OpRecord)
+	}
+}
+
+func TestReconcileRemoteMTimeChangeWithUnchangedETagAndSizeRecordsState(t *testing.T) {
+	old := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	changed := old.Add(time.Hour)
+
+	local := map[string]LocalFile{
+		"a.txt": file("a.txt", 10, old),
+	}
+	remote := map[string]icloud.Item{
+		"a.txt": remoteFile("a.txt", "e1", 10, changed),
+	}
+	state := map[string]Entry{
+		"a.txt": {
+			Size: 10, LocalMTime: old, Etag: "e1",
+			RemoteMTime: old, DrivewsID: "x",
+		},
+	}
+
+	ops := Reconcile(local, remote, state, basePolicy)
+	op := findOp(t, ops, "a.txt")
+	// A metadata-only change does not trigger a download; Reconcile records state.
+	if op.Kind != OpRecord {
+		t.Fatalf("mtime-only change with unchanged ETag and size: got %s, want %s", op.Kind, OpRecord)
+	}
+}
