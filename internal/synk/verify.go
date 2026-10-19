@@ -42,10 +42,16 @@ func (r VerifyReport) Complete() bool {
 // It does not create directories, invoke reconciliation, or read/write sync state.
 func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) (VerifyReport, error) {
 	var report VerifyReport
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	scanner := &Scanner{Root: cfg.DriveDir(), Exclude: cfg.Exclude}
 	local, skipped, _, err := scanner.Scan()
 	if err != nil {
 		return report, fmt.Errorf("local inventory incomplete: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
 	}
 	report.SkippedLocal = append(report.SkippedLocal, skipped...)
 
@@ -65,6 +71,9 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 		parts := strings.Split(cfg.DriveSubfolder, "/")
 		for _, part := range parts {
 			folders, err := cl.ListFolders(ctx, []string{rootID})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return report, ctxErr
+			}
 			if err != nil {
 				return report, fmt.Errorf("resolving iCloud folder %q: %w", part, err)
 			}
@@ -112,6 +121,9 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 			ids = ids[:folderBatch]
 		}
 		folders, err := cl.ListFolders(ctx, ids)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return report, ctxErr
+		}
 		if err != nil {
 			return report, fmt.Errorf("listing iCloud Drive: %w", err)
 		}
@@ -201,6 +213,9 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		item := remoteFiles[p]
 		if item.Type == icloud.TypePackage || item.ItemCount > 0 {
 			report.Unverifiable = append(report.Unverifiable, "Paketinhalt nicht direkt vergleichbar: "+p)
@@ -219,6 +234,9 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 		}
 		remoteHash := sha256.New()
 		n, err := cl.Download(ctx, item, remoteHash)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return report, ctxErr
+		}
 		if err != nil {
 			report.Unverifiable = append(report.Unverifiable, fmt.Sprintf("iCloud-Abruf fehlgeschlagen (%s): %v", p, err))
 			continue

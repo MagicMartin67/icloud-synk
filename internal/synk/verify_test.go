@@ -15,9 +15,10 @@ import (
 )
 
 type verifyFakeClient struct {
-	folders  map[string]icloud.Folder
-	data     map[string][]byte
-	failList bool
+	folders   map[string]icloud.Folder
+	data      map[string][]byte
+	failList  bool
+	afterList func()
 }
 
 func (f *verifyFakeClient) ListFolders(_ context.Context, ids []string) ([]icloud.Folder, error) {
@@ -30,6 +31,9 @@ func (f *verifyFakeClient) ListFolders(_ context.Context, ids []string) ([]iclou
 			out = append(out, folder)
 		}
 	}
+	if f.afterList != nil {
+		f.afterList()
+	}
 	return out, nil
 }
 
@@ -40,6 +44,53 @@ func (f *verifyFakeClient) Download(_ context.Context, item icloud.Item, w io.Wr
 	}
 	n, err := io.Copy(w, bytes.NewReader(data))
 	return n, err
+}
+
+func TestVerifyDriveReturnsCanceledContext(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := &config.Config{TargetDir: root}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{},
+		data:    map[string][]byte{},
+	}
+
+	_, err := VerifyDrive(ctx, cfg, client)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestVerifyDriveStopsWhenContextCanceledDuringListing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := &config.Config{TargetDir: root}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item: icloud.Item{DrivewsID: icloud.RootFolderID},
+			},
+		},
+		data:      map[string][]byte{},
+		afterList: cancel,
+	}
+
+	_, err := VerifyDrive(ctx, cfg, client)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled after listing, got %v", err)
+	}
 }
 
 func TestVerifyDriveIdenticalFiles(t *testing.T) {
