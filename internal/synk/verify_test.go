@@ -143,8 +143,8 @@ func TestVerifyDriveAbortsOnIncompleteInventory(t *testing.T) {
 	cfg := &config.Config{TargetDir: root}
 	client := &verifyFakeClient{folders: map[string]icloud.Folder{}, data: map[string][]byte{}}
 	_, err := VerifyDrive(context.Background(), cfg, client)
-	if err == nil {
-		t.Fatal("expected incomplete inventory error")
+	if err == nil || !strings.Contains(err.Error(), "inventory incomplete") {
+		t.Fatalf("expected incomplete inventory error, got %v", err)
 	}
 }
 
