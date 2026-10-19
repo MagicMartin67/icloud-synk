@@ -293,6 +293,41 @@ func TestVerifyDriveDetectsRemoteFileMissingLocally(t *testing.T) {
 	}
 }
 
+func TestVerifyDriveAbortsOnCyclicFolderReference(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{TargetDir: root}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item: icloud.Item{DrivewsID: icloud.RootFolderID},
+				Items: []icloud.Item{{
+					DrivewsID: "folder-a",
+					Name:      "folder-a",
+					Type:      icloud.TypeFolder,
+				}},
+			},
+			"folder-a": {
+				Item: icloud.Item{DrivewsID: "folder-a"},
+				Items: []icloud.Item{{
+					DrivewsID: "folder-a",
+					Name:      "self-reference",
+					Type:      icloud.TypeFolder,
+				}},
+			},
+		},
+		data: map[string][]byte{},
+	}
+
+	_, err := VerifyDrive(context.Background(), cfg, client)
+	if err == nil || !strings.Contains(err.Error(), "referenced at multiple paths") {
+		t.Fatalf("expected cyclic folder reference error, got %v", err)
+	}
+}
+
 func TestVerifyDriveDetectsFolderDifferences(t *testing.T) {
 	t.Run("local folder missing remotely", func(t *testing.T) {
 		root := t.TempDir()

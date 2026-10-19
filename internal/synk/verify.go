@@ -91,6 +91,7 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 	remoteDirs := make(map[string]bool)
 	remotePaths := make(map[string]string)
 	pending := map[string]string{rootID: ""}
+	visited := map[string]string{rootID: ""}
 	for len(pending) > 0 {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -136,7 +137,17 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 				remotePaths[rel] = item.DrivewsID
 				if item.IsDir() {
 					remoteDirs[rel] = true
-					next[item.DrivewsID] = rel
+					if previousPath, exists := visited[item.DrivewsID]; exists {
+						if previousPath != rel {
+							return report, fmt.Errorf(
+								"iCloud folder %q referenced at multiple paths %q and %q; verification aborted",
+								item.DrivewsID, previousPath, rel,
+							)
+						}
+					} else {
+						visited[item.DrivewsID] = rel
+						next[item.DrivewsID] = rel
+					}
 				} else {
 					remoteFiles[rel] = item
 				}
