@@ -89,6 +89,7 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 
 	remoteFiles := make(map[string]icloud.Item)
 	remoteDirs := make(map[string]bool)
+	remotePaths := make(map[string]string)
 	pending := map[string]string{rootID: ""}
 	for len(pending) > 0 {
 		if err := ctx.Err(); err != nil {
@@ -126,6 +127,13 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 				if scanner.IsExcluded(rel) {
 					continue
 				}
+				if previousID, exists := remotePaths[rel]; exists && previousID != item.DrivewsID {
+					return report, fmt.Errorf(
+						"iCloud path collision after sanitizing %q (items %q and %q); verification aborted",
+						rel, previousID, item.DrivewsID,
+					)
+				}
+				remotePaths[rel] = item.DrivewsID
 				if item.IsDir() {
 					remoteDirs[rel] = true
 					next[item.DrivewsID] = rel

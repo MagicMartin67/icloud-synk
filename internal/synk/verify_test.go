@@ -74,6 +74,40 @@ func TestVerifyDriveIdenticalFiles(t *testing.T) {
 	}
 }
 
+func TestVerifyDriveAbortsOnSanitizedPathCollision(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{TargetDir: root}
+	first := icloud.Item{
+		DrivewsID: "file-1", DocwsID: "doc-1",
+		Name: " hello", Extension: "txt", Type: icloud.TypeFile, Size: 5,
+	}
+	second := icloud.Item{
+		DrivewsID: "file-2", DocwsID: "doc-2",
+		Name: "hello", Extension: "txt", Type: icloud.TypeFile, Size: 5,
+	}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item:  icloud.Item{DrivewsID: icloud.RootFolderID},
+				Items: []icloud.Item{first, second},
+			},
+		},
+		data: map[string][]byte{
+			"doc-1": []byte("hello"),
+			"doc-2": []byte("world"),
+		},
+	}
+
+	report, err := VerifyDrive(context.Background(), cfg, client)
+	if err == nil || !strings.Contains(err.Error(), "iCloud path collision") {
+		t.Fatalf("expected path collision error, got report=%+v err=%v", report, err)
+	}
+}
+
 func TestVerifyDriveDetectsContentDifference(t *testing.T) {
 	root := t.TempDir()
 	drive := filepath.Join(root, "Drive")
