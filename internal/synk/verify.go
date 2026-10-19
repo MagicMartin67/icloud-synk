@@ -68,22 +68,29 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 			if err != nil {
 				return report, fmt.Errorf("resolving iCloud folder %q: %w", part, err)
 			}
-			found := false
+			var matchedID string
+			matches := 0
 			for _, folder := range folders {
 				if folder.DrivewsID != rootID {
 					continue
 				}
 				for _, item := range folder.Items {
 					if item.IsDir() && sanitizeName(item.FullName()) == part {
-						rootID = item.DrivewsID
-						found = true
-						break
+						matchedID = item.DrivewsID
+						matches++
 					}
 				}
 			}
-			if !found {
+			if matches == 0 {
 				return report, fmt.Errorf("configured iCloud folder %q not found; verification aborted", cfg.DriveSubfolder)
 			}
+			if matches > 1 {
+				return report, fmt.Errorf(
+					"configured iCloud folder component %q is ambiguous (%d matches); verification aborted",
+					part, matches,
+				)
+			}
+			rootID = matchedID
 		}
 	}
 

@@ -224,6 +224,41 @@ func TestVerifyDriveResolvesConfiguredSubfolder(t *testing.T) {
 	}
 }
 
+func TestVerifyDriveAbortsOnAmbiguousConfiguredSubfolder(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		TargetDir:      root,
+		DriveSubfolder: "Tappe/Dokumente sync NAS",
+	}
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item: icloud.Item{DrivewsID: icloud.RootFolderID},
+				Items: []icloud.Item{
+					{DrivewsID: "folder-tappe-1", Name: "Tappe", Type: icloud.TypeFolder},
+					{DrivewsID: "folder-tappe-2", Name: "Tappe", Type: icloud.TypeFolder},
+				},
+			},
+			"folder-tappe-1": {
+				Item: icloud.Item{DrivewsID: "folder-tappe-1"},
+			},
+			"folder-tappe-2": {
+				Item: icloud.Item{DrivewsID: "folder-tappe-2"},
+			},
+		},
+		data: map[string][]byte{},
+	}
+
+	_, err := VerifyDrive(context.Background(), cfg, client)
+	if err == nil || !strings.Contains(err.Error(), "is ambiguous") {
+		t.Fatalf("expected ambiguous configured subfolder error, got %v", err)
+	}
+}
+
 func TestVerifyDriveDetectsLocalFileMissingInRemote(t *testing.T) {
 	root := t.TempDir()
 	drive := filepath.Join(root, "Drive")
