@@ -15,10 +15,11 @@ import (
 )
 
 type verifyFakeClient struct {
-	folders   map[string]icloud.Folder
-	data      map[string][]byte
-	failList  bool
-	afterList func()
+	folders       map[string]icloud.Folder
+	data          map[string][]byte
+	failList      bool
+	afterList     func()
+	afterDownload func()
 }
 
 func (f *verifyFakeClient) ListFolders(_ context.Context, ids []string) ([]icloud.Folder, error) {
@@ -43,6 +44,9 @@ func (f *verifyFakeClient) Download(_ context.Context, item icloud.Item, w io.Wr
 		return 0, errors.New("download missing")
 	}
 	n, err := io.Copy(w, bytes.NewReader(data))
+	if f.afterDownload != nil {
+		f.afterDownload()
+	}
 	return n, err
 }
 
@@ -90,6 +94,56 @@ func TestVerifyDriveStopsWhenContextCanceledDuringListing(t *testing.T) {
 	_, err := VerifyDrive(ctx, cfg, client)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled after listing, got %v", err)
+	}
+}
+
+func TestVerifyDriveReportsLocalFileChangedDuringVerification(t *testing.T) {
+	root := t.TempDir()
+	drive := filepath.Join(root, "Drive")
+	if err := os.MkdirAll(drive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	localPath := filepath.Join(drive, "hello.txt")
+	if err := os.WriteFile(localPath, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{TargetDir: root}
+	item := icloud.Item{
+		DrivewsID: "file-1",
+		DocwsID:   "doc-1",
+		Name:      "hello",
+		Extension: "txt",
+		Type:      icloud.TypeFile,
+		Size:      5,
+	}
+
+	client := &verifyFakeClient{
+		folders: map[string]icloud.Folder{
+			icloud.RootFolderID: {
+				Item:  icloud.Item{DrivewsID: icloud.RootFolderID},
+				Items: []icloud.Item{item},
+			},
+		},
+		data: map[string][]byte{"doc-1": []byte("hello")},
+		afterDownload: func() {
+			if err := os.WriteFile(localPath, []byte("changed"), 0o600); err != nil {
+				t.Errorf("could not change local file during verification: %v", err)
+			}
+		},
+	}
+
+	report, err := VerifyDrive(context.Background(), cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Unverifiable) != 1 ||
+		!strings.Contains(report.Unverifiable[0], "änderte sich während der Prüfung") {
+		t.Fatalf("expected changed local file to be unverifiable, got %+v", report)
+	}
+	if report.Complete() {
+		t.Fatal("verification must not be complete when the local file changes")
 	}
 }
 
