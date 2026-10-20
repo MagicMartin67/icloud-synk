@@ -147,6 +147,54 @@ func TestVerifyDriveReportsLocalFileChangedDuringVerification(t *testing.T) {
 	}
 }
 
+func TestVerifyReportComplete(t *testing.T) {
+	tests := []struct {
+		name   string
+		report VerifyReport
+		want   bool
+	}{
+		{name: "empty report", want: true},
+		{
+			name:   "all files identical",
+			report: VerifyReport{LocalFiles: 1, RemoteFiles: 1, Identical: 1},
+			want:   true,
+		},
+		{
+			name:   "differences present",
+			report: VerifyReport{Differences: []string{"file.txt"}},
+			want:   false,
+		},
+		{
+			name:   "unverifiable files present",
+			report: VerifyReport{Unverifiable: []string{"file.txt"}},
+			want:   false,
+		},
+		{
+			name:   "local files skipped",
+			report: VerifyReport{SkippedLocal: []string{"file.txt"}},
+			want:   false,
+		},
+		{
+			name:   "local and remote counts differ",
+			report: VerifyReport{LocalFiles: 1, RemoteFiles: 2, Identical: 1},
+			want:   false,
+		},
+		{
+			name:   "identical count differs from local count",
+			report: VerifyReport{LocalFiles: 2, RemoteFiles: 2, Identical: 1},
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.report.Complete(); got != tt.want {
+				t.Errorf("Complete() = %v, want %v; report = %+v", got, tt.want, tt.report)
+			}
+		})
+	}
+}
+
 func TestVerifyDriveIdenticalFiles(t *testing.T) {
 	root := t.TempDir()
 	drive := filepath.Join(root, "Drive")
