@@ -227,8 +227,11 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 			report.Unverifiable = append(report.Unverifiable, fmt.Sprintf("Lokal nicht statbar (%s): %v", p, err))
 			continue
 		}
-		localHash, err := hashLocalFile(localPath)
+		localHash, err := hashLocalFile(ctx, localPath)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return report, ctxErr
+			}
 			report.Unverifiable = append(report.Unverifiable, fmt.Sprintf("Lokal nicht lesbar (%s): %v", p, err))
 			continue
 		}
@@ -267,14 +270,26 @@ func VerifyDrive(ctx context.Context, cfg *config.Config, cl driveVerifyClient) 
 	return report, nil
 }
 
-func hashLocalFile(p string) (string, error) {
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+func hashLocalFile(ctx context.Context, p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, contextReader{ctx: ctx, reader: f}); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

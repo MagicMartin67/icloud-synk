@@ -50,6 +50,35 @@ func (f *verifyFakeClient) Download(_ context.Context, item icloud.Item, w io.Wr
 	return n, err
 }
 
+type cancelAfterFirstRead struct {
+	cancel context.CancelFunc
+	read   bool
+}
+
+func (r *cancelAfterFirstRead) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.EOF
+	}
+	r.read = true
+	p[0] = 'x'
+	r.cancel()
+	return 1, nil
+}
+
+func TestContextReaderStopsWhenContextCanceledDuringRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	source := &cancelAfterFirstRead{cancel: cancel}
+	reader := contextReader{ctx: ctx, reader: source}
+	buf := make([]byte, 1)
+
+	if n, err := reader.Read(buf); n != 1 || err != nil {
+		t.Fatalf("first Read() = (%d, %v), want (1, nil)", n, err)
+	}
+	if _, err := reader.Read(buf); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Read() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestVerifyDriveReturnsCanceledContext(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "Drive"), 0o755); err != nil {
